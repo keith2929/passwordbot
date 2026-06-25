@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: password-vault-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ALLOWED_USER_ID
+        sync: false
+      - key: MASTER_PASSWORD
+        sync: false
+    disk:
+      name: vault-data
+      mountPath: /data
+      sizeGB: 1
