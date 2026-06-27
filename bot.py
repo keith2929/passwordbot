@@ -264,6 +264,7 @@ def main():
             PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_password)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=False,
     )
 
     get_conv = ConversationHandler(
@@ -275,6 +276,7 @@ def main():
             GET_SITE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_password)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=False,
     )
 
     delete_conv = ConversationHandler(
@@ -286,6 +288,7 @@ def main():
             DELETE_SITE: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=False,
     )
 
     app.add_handler(CommandHandler("start", start))
