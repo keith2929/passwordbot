@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from typing import Optional, List, Tuple
 
@@ -7,6 +8,7 @@ DB_PATH = "/data/vault.db"
 class Database:
     def __init__(self, path: str = DB_PATH):
         self.path = path
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._init()
 
     def _connect(self):
