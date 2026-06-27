@@ -140,6 +140,9 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    import asyncio
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     add_conv = ConversationHandler(
