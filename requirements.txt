@@ -1,3 +1,4 @@
 python-telegram-bot[job-queue]==21.6
 cryptography==42.0.8
 psycopg2-binary>=2.9.9
+openpyxl>=3.1.0
