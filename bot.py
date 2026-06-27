@@ -27,6 +27,7 @@ SITE, USERNAME, PASSWORD = range(3)
 GET_SITE = 3
 DELETE_SITE = 4
 MASTER_CONFIRM = 5
+SEARCH = 6
 
 MENU_KB = ReplyKeyboardMarkup([["🔐 Menu"]], resize_keyboard=True)
 
@@ -38,9 +39,10 @@ def is_allowed(update: Update) -> bool:
 def menu_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add", callback_data="add"),
-         InlineKeyboardButton("📋 List", callback_data="list")],
-        [InlineKeyboardButton("🗑️ Delete", callback_data="delete"),
-         InlineKeyboardButton("📥 Import Excel", callback_data="import")],
+         InlineKeyboardButton("🔍 Search", callback_data="search")],
+        [InlineKeyboardButton("📋 List", callback_data="list"),
+         InlineKeyboardButton("🗑️ Delete", callback_data="delete")],
+        [InlineKeyboardButton("📥 Import Excel", callback_data="import")],
     ])
 
 
@@ -127,6 +129,37 @@ async def list_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send("📋 *Tap a site to retrieve its password:*",
                    parse_mode="Markdown",
                    reply_markup=sites_inline(sites))
+
+
+# ── SEARCH ───────────────────────────────────────────────
+
+async def search_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return ConversationHandler.END
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("🔍 Type a site name to search:")
+    return SEARCH
+
+
+async def search_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip().lower()
+    results = db.search_sites(query)
+    if not results:
+        await update.message.reply_text(f"❌ No matches for *{query}*.", parse_mode="Markdown")
+        return ConversationHandler.END
+    if len(results) == 1:
+        ctx.user_data["pending_site"] = results[0]
+        msg = await update.message.reply_text(
+            "🔑 Enter master password to unlock:\n_Message will be deleted immediately._",
+            parse_mode="Markdown",
+        )
+        ctx.user_data["prompt_msg_id"] = msg.message_id
+        return MASTER_CONFIRM
+    await update.message.reply_text(
+        f"Found {len(results)} matches — tap one:",
+        reply_markup=sites_inline(results),
+    )
+    return ConversationHandler.END
 
 
 # ── GET by site button → master password confirm ──────────
@@ -305,6 +338,18 @@ def main():
         per_message=False,
     )
 
+    search_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(search_start, pattern="^search$"),
+        ],
+        states={
+            SEARCH:         [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query)],
+            MASTER_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, master_confirm)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=False,
+    )
+
     get_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(site_selected, pattern="^site:"),
@@ -335,6 +380,7 @@ def main():
     app.add_handler(CallbackQueryHandler(import_prompt, pattern="^import$"))
     app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), import_excel))
     app.add_handler(add_conv)
+    app.add_handler(search_conv)
     app.add_handler(get_conv)
     app.add_handler(delete_conv)
 

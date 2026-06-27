@@ -68,6 +68,15 @@ class Database:
                 cur.execute("SELECT site FROM vault ORDER BY site")
                 return [r[0] for r in cur.fetchall()]
 
+    def search_sites(self, query: str) -> List[str]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT site FROM vault WHERE site ILIKE %s ORDER BY site",
+                    (f"%{query}%",)
+                )
+                return [r[0] for r in cur.fetchall()]
+
     def delete_entry(self, site: str) -> bool:
         with self._connect() as conn:
             with conn.cursor() as cur:
