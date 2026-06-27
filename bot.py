@@ -2,6 +2,8 @@ import os
 import io
 import logging
 import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import openpyxl
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
@@ -249,7 +251,20 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+def _start_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        def log_message(self, *args):
+            pass
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+
 def main():
+    threading.Thread(target=_start_health_server, daemon=True).start()
     asyncio.set_event_loop(asyncio.new_event_loop())
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
