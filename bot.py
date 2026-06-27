@@ -26,6 +26,7 @@ db = Database()
 SITE, USERNAME, PASSWORD = range(3)
 GET_SITE = 3
 DELETE_SITE = 4
+MASTER_CONFIRM = 5
 
 MENU_KB = ReplyKeyboardMarkup([["🔐 Menu"]], resize_keyboard=True)
 
@@ -37,11 +38,15 @@ def is_allowed(update: Update) -> bool:
 def menu_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add", callback_data="add"),
-         InlineKeyboardButton("🔍 Get", callback_data="get")],
-        [InlineKeyboardButton("📋 List", callback_data="list"),
-         InlineKeyboardButton("🗑️ Delete", callback_data="delete")],
-        [InlineKeyboardButton("📥 Import Excel", callback_data="import")],
+         InlineKeyboardButton("📋 List", callback_data="list")],
+        [InlineKeyboardButton("🗑️ Delete", callback_data="delete"),
+         InlineKeyboardButton("📥 Import Excel", callback_data="import")],
     ])
+
+
+def sites_inline(sites: list) -> InlineKeyboardMarkup:
+    buttons = [[InlineKeyboardButton(s, callback_data=f"site:{s}")] for s in sites]
+    return InlineKeyboardMarkup(buttons)
 
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -105,25 +110,61 @@ async def add_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── GET ───────────────────────────────────────────────────
+# ── LIST (tappable) ───────────────────────────────────────
 
-async def get_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return ConversationHandler.END
+async def list_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text("Which site?")
+        send = update.callback_query.message.reply_text
     else:
-        await update.message.reply_text("Which site?")
-    return GET_SITE
+        if not is_allowed(update):
+            return
+        send = update.message.reply_text
+    sites = db.list_sites()
+    if not sites:
+        await send("No entries saved yet.")
+    else:
+        await send("📋 *Tap a site to retrieve its password:*",
+                   parse_mode="Markdown",
+                   reply_markup=sites_inline(sites))
 
 
-async def get_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    site = update.message.text.strip().lower()
+# ── GET by site button → master password confirm ──────────
+
+async def site_selected(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    site = query.data.split(":", 1)[1]
+    ctx.user_data["pending_site"] = site
+    msg = await query.message.reply_text(
+        "🔑 Enter master password to unlock:\n_Message will be deleted immediately._",
+        parse_mode="Markdown",
+    )
+    ctx.user_data["prompt_msg_id"] = msg.message_id
+    return MASTER_CONFIRM
+
+
+async def master_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    typed = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    try:
+        await ctx.bot.delete_message(update.effective_chat.id, ctx.user_data.get("prompt_msg_id"))
+    except Exception:
+        pass
+
+    if typed != MASTER_PASSWORD:
+        await ctx.bot.send_message(update.effective_chat.id, "❌ Wrong master password.")
+        return ConversationHandler.END
+
+    site = ctx.user_data["pending_site"]
     entry = db.get_entry(site)
     if not entry:
-        await update.message.reply_text(f"❌ No entry for *{site}*.", parse_mode="Markdown")
+        await ctx.bot.send_message(update.effective_chat.id, f"❌ No entry for *{site}*.", parse_mode="Markdown")
         return ConversationHandler.END
+
     username, enc_pass, type_, website, notes = entry
     password = decrypt(MASTER_PASSWORD, enc_pass)
     lines = [f"🔑 *{site}*", f"👤 `{username}`", f"🔒 `{password}`"]
@@ -134,7 +175,7 @@ async def get_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if notes:
         lines.append(f"📝 {notes}")
     lines.append("\n_Self-deletes in 30s_")
-    msg = await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    msg = await ctx.bot.send_message(update.effective_chat.id, "\n".join(lines), parse_mode="Markdown")
 
     async def _delete(context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -166,24 +207,6 @@ async def delete_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ No entry for *{site}*.", parse_mode="Markdown")
     return ConversationHandler.END
-
-
-# ── LIST ──────────────────────────────────────────────────
-
-async def list_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        await update.callback_query.answer()
-        send = update.callback_query.message.reply_text
-    else:
-        if not is_allowed(update):
-            return
-        send = update.message.reply_text
-    sites = db.list_sites()
-    if not sites:
-        await send("No entries saved yet.")
-    else:
-        lines = "\n".join(f"• {s}" for s in sites)
-        await send(f"📋 *Saved entries:*\n{lines}", parse_mode="Markdown")
 
 
 # ── IMPORT ────────────────────────────────────────────────
@@ -284,11 +307,10 @@ def main():
 
     get_conv = ConversationHandler(
         entry_points=[
-            CommandHandler("get", get_start),
-            CallbackQueryHandler(get_start, pattern="^get$"),
+            CallbackQueryHandler(site_selected, pattern="^site:"),
         ],
         states={
-            GET_SITE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_password)],
+            MASTER_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, master_confirm)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_message=False,
