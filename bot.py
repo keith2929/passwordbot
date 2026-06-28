@@ -23,11 +23,15 @@ MASTER_PASSWORD = os.environ["MASTER_PASSWORD"]
 
 db = Database()
 
+# Conversation states
 SITE, USERNAME, PASSWORD = range(3)
-GET_SITE = 3
-DELETE_SITE = 4
+GET_SITE      = 3
+DELETE_SITE   = 4
 MASTER_CONFIRM = 5
-SEARCH = 6
+SEARCH        = 6
+ACTION        = 7
+EDIT_USERNAME = 8
+EDIT_PASSWORD = 9
 
 MENU_KB = ReplyKeyboardMarkup([["🔐 Menu"]], resize_keyboard=True)
 
@@ -38,18 +42,36 @@ def is_allowed(update: Update) -> bool:
 
 def menu_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add", callback_data="add"),
-         InlineKeyboardButton("🔍 Search", callback_data="search")],
-        [InlineKeyboardButton("📋 List", callback_data="list"),
-         InlineKeyboardButton("🗑️ Delete", callback_data="delete")],
-        [InlineKeyboardButton("📥 Import Excel", callback_data="import")],
+        [InlineKeyboardButton("➕ Add",          callback_data="add"),
+         InlineKeyboardButton("🔍 Search",       callback_data="search")],
+        [InlineKeyboardButton("📋 List",          callback_data="list"),
+         InlineKeyboardButton("🗑️ Delete",        callback_data="delete")],
+        [InlineKeyboardButton("📥 Import Excel",  callback_data="import")],
     ])
 
 
 def sites_inline(sites: list) -> InlineKeyboardMarkup:
-    buttons = [[InlineKeyboardButton(s, callback_data=f"site:{s}")] for s in sites]
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(s, callback_data=f"site:{s}")] for s in sites]
+    )
 
+
+def action_inline() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👁 Reveal Password", callback_data="action_reveal"),
+         InlineKeyboardButton("✏️ Edit",            callback_data="action_edit")],
+    ])
+
+
+def edit_field_inline() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Username", callback_data="edit_username"),
+         InlineKeyboardButton("🔒 Password", callback_data="edit_password")],
+        [InlineKeyboardButton("📝 Both",     callback_data="edit_both")],
+    ])
+
+
+# ── START / MENU ──────────────────────────────────────────
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
@@ -126,12 +148,14 @@ async def list_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not sites:
         await send("No entries saved yet.")
     else:
-        await send("📋 *Tap a site to retrieve its password:*",
-                   parse_mode="Markdown",
-                   reply_markup=sites_inline(sites))
+        await send(
+            "📋 *Tap a site to retrieve its password:*",
+            parse_mode="Markdown",
+            reply_markup=sites_inline(sites),
+        )
 
 
-# ── SEARCH ───────────────────────────────────────────────
+# ── SEARCH ────────────────────────────────────────────────
 
 async def search_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
@@ -150,7 +174,7 @@ async def search_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(results) == 1:
         ctx.user_data["pending_site"] = results[0]
         msg = await update.message.reply_text(
-            "🔑 Enter master password to unlock:\n_Message will be deleted immediately._",
+            "🔑 Enter master password:\n_Message will be deleted immediately._",
             parse_mode="Markdown",
         )
         ctx.user_data["prompt_msg_id"] = msg.message_id
@@ -162,7 +186,7 @@ async def search_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── GET by site button → master password confirm ──────────
+# ── SITE SELECTED → MASTER PASSWORD ───────────────────────
 
 async def site_selected(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -170,7 +194,7 @@ async def site_selected(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     site = query.data.split(":", 1)[1]
     ctx.user_data["pending_site"] = site
     msg = await query.message.reply_text(
-        "🔑 Enter master password to unlock:\n_Message will be deleted immediately._",
+        "🔑 Enter master password:\n_Message will be deleted immediately._",
         parse_mode="Markdown",
     )
     ctx.user_data["prompt_msg_id"] = msg.message_id
@@ -195,11 +219,31 @@ async def master_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     site = ctx.user_data["pending_site"]
     entry = db.get_entry(site)
     if not entry:
-        await ctx.bot.send_message(update.effective_chat.id, f"❌ No entry for *{site}*.", parse_mode="Markdown")
+        await ctx.bot.send_message(
+            update.effective_chat.id,
+            f"❌ No entry for *{site}*.",
+            parse_mode="Markdown",
+        )
         return ConversationHandler.END
 
-    username, enc_pass, type_, website, notes = entry
+    ctx.user_data["entry"] = entry
+    await ctx.bot.send_message(
+        update.effective_chat.id,
+        f"🔐 *{site}* — verified. What would you like to do?",
+        parse_mode="Markdown",
+        reply_markup=action_inline(),
+    )
+    return ACTION
+
+
+# ── ACTION: REVEAL ─────────────────────────────────────────
+
+async def action_reveal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    site = ctx.user_data["pending_site"]
+    username, enc_pass, type_, website, notes = ctx.user_data["entry"]
     password = decrypt(MASTER_PASSWORD, enc_pass)
+
     lines = [f"🔑 *{site}*", f"👤 `{username}`", f"🔒 `{password}`"]
     if type_:
         lines.append(f"🏷️ {type_}")
@@ -208,7 +252,10 @@ async def master_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if notes:
         lines.append(f"📝 {notes}")
     lines.append("\n_Self-deletes in 30s_")
-    msg = await ctx.bot.send_message(update.effective_chat.id, "\n".join(lines), parse_mode="Markdown")
+
+    msg = await update.callback_query.message.reply_text(
+        "\n".join(lines), parse_mode="Markdown"
+    )
 
     async def _delete(context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -217,6 +264,83 @@ async def master_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
     ctx.job_queue.run_once(_delete, when=30)
+    return ConversationHandler.END
+
+
+# ── ACTION: EDIT ───────────────────────────────────────────
+
+async def action_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    site = ctx.user_data["pending_site"]
+    await update.callback_query.message.reply_text(
+        f"✏️ Editing *{site}* — what would you like to update?",
+        parse_mode="Markdown",
+        reply_markup=edit_field_inline(),
+    )
+    return ACTION
+
+
+async def edit_choose_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    ctx.user_data["edit_fields"] = ["username"]
+    await update.callback_query.message.reply_text("Enter new username or email:")
+    return EDIT_USERNAME
+
+
+async def edit_choose_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    ctx.user_data["edit_fields"] = ["password"]
+    await update.callback_query.message.reply_text(
+        "Enter new password:\n_Message will be deleted immediately._",
+        parse_mode="Markdown",
+    )
+    return EDIT_PASSWORD
+
+
+async def edit_choose_both(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    ctx.user_data["edit_fields"] = ["username", "password"]
+    await update.callback_query.message.reply_text("Enter new username or email:")
+    return EDIT_USERNAME
+
+
+async def edit_username_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["new_username"] = update.message.text.strip()
+    if "password" in ctx.user_data.get("edit_fields", []):
+        await update.message.reply_text(
+            "Enter new password:\n_Message will be deleted immediately._",
+            parse_mode="Markdown",
+        )
+        return EDIT_PASSWORD
+    # username only — save now
+    site = ctx.user_data["pending_site"]
+    _, enc_pass, type_, website, notes = ctx.user_data["entry"]
+    db.save_entry(
+        site, ctx.user_data["new_username"], enc_pass,
+        type_=type_, website=website, notes=notes,
+    )
+    await update.message.reply_text(f"✅ Username updated for *{site}*.", parse_mode="Markdown")
+    return ConversationHandler.END
+
+
+async def edit_password_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    new_password = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    site = ctx.user_data["pending_site"]
+    _, _, type_, website, notes = ctx.user_data["entry"]
+    username = ctx.user_data.get("new_username") or ctx.user_data["entry"][0]
+    db.save_entry(
+        site, username, encrypt(MASTER_PASSWORD, new_password),
+        type_=type_, website=website, notes=notes,
+    )
+    await ctx.bot.send_message(
+        update.effective_chat.id,
+        f"✅ Entry updated for *{site}*.",
+        parse_mode="Markdown",
+    )
     return ConversationHandler.END
 
 
@@ -307,6 +431,8 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ── HEALTH SERVER ─────────────────────────────────────────
+
 def _start_health_server():
     port = int(os.environ.get("PORT", 8080))
     class Handler(BaseHTTPRequestHandler):
@@ -338,24 +464,24 @@ def main():
         per_message=False,
     )
 
-    search_conv = ConversationHandler(
+    # Handles site: callbacks and search → master confirm → reveal/edit
+    vault_conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(search_start, pattern="^search$"),
+            CallbackQueryHandler(site_selected,  pattern="^site:"),
+            CallbackQueryHandler(search_start,   pattern="^search$"),
         ],
         states={
             SEARCH:         [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query)],
             MASTER_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, master_confirm)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_message=False,
-    )
-
-    get_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(site_selected, pattern="^site:"),
-        ],
-        states={
-            MASTER_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, master_confirm)],
+            ACTION: [
+                CallbackQueryHandler(action_reveal,       pattern="^action_reveal$"),
+                CallbackQueryHandler(action_edit,         pattern="^action_edit$"),
+                CallbackQueryHandler(edit_choose_username, pattern="^edit_username$"),
+                CallbackQueryHandler(edit_choose_password, pattern="^edit_password$"),
+                CallbackQueryHandler(edit_choose_both,    pattern="^edit_both$"),
+            ],
+            EDIT_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_username_input)],
+            EDIT_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_password_input)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_message=False,
@@ -376,12 +502,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_handler))
     app.add_handler(MessageHandler(filters.Text(["🔐 Menu"]), show_menu))
-    app.add_handler(CallbackQueryHandler(list_handler, pattern="^list$"))
-    app.add_handler(CallbackQueryHandler(import_prompt, pattern="^import$"))
+    app.add_handler(CallbackQueryHandler(list_handler,    pattern="^list$"))
+    app.add_handler(CallbackQueryHandler(import_prompt,   pattern="^import$"))
     app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), import_excel))
     app.add_handler(add_conv)
-    app.add_handler(search_conv)
-    app.add_handler(get_conv)
+    app.add_handler(vault_conv)
     app.add_handler(delete_conv)
 
     logger.info("Bot is running...")
