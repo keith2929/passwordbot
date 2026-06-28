@@ -37,14 +37,32 @@ class Database:
                     ("notes",   "TEXT DEFAULT ''"),
                 ]:
                     cur.execute(f"ALTER TABLE vault ADD COLUMN IF NOT EXISTS {col} {defn}")
+                # column definitions per site
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS vault_extra_cols (
+                        id        SERIAL PRIMARY KEY,
+                        site      TEXT NOT NULL REFERENCES vault(site) ON DELETE CASCADE,
+                        col_name  TEXT NOT NULL,
+                        position  INT  NOT NULL DEFAULT 0,
+                        UNIQUE (site, col_name)
+                    )
+                """)
+                # cell data: one row per (site, row_num, col_name)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS vault_extras (
-                        id         SERIAL PRIMARY KEY,
-                        site       TEXT NOT NULL REFERENCES vault(site) ON DELETE CASCADE,
-                        key        TEXT NOT NULL DEFAULT '',
-                        value      TEXT NOT NULL DEFAULT '',
-                        created_at TIMESTAMPTZ DEFAULT NOW()
+                        id       SERIAL PRIMARY KEY,
+                        site     TEXT NOT NULL REFERENCES vault(site) ON DELETE CASCADE,
+                        row_num  INT  NOT NULL DEFAULT 1,
+                        col_name TEXT NOT NULL DEFAULT '',
+                        value    TEXT NOT NULL DEFAULT '',
+                        UNIQUE (site, row_num, col_name)
                     )
+                """)
+                # migrate old key/value schema if needed
+                cur.execute("""
+                    ALTER TABLE vault_extras
+                        ADD COLUMN IF NOT EXISTS row_num  INT  NOT NULL DEFAULT 1,
+                        ADD COLUMN IF NOT EXISTS col_name TEXT NOT NULL DEFAULT ''
                 """)
             conn.commit()
 
@@ -128,38 +146,89 @@ class Database:
             conn.commit()
         return deleted
 
-    # ── Extras (question / answer rows) ──────────────────────
+    # ── Extras ────────────────────────────────────────────────
 
-    def get_extras(self, site: str) -> List[Dict]:
-        """Returns [{id, key, value}] ordered by id."""
+    def get_extra_cols(self, site: str) -> List[str]:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, key, value FROM vault_extras WHERE site = %s ORDER BY id",
+                    "SELECT col_name FROM vault_extra_cols WHERE site = %s ORDER BY position, id",
                     (site,)
                 )
-                return [{"id": r[0], "key": r[1], "value": r[2]} for r in cur.fetchall()]
+                return [r[0] for r in cur.fetchall()]
 
-    def add_extra(self, site: str, key: str, value: str):
+    def add_extra_col(self, site: str, col_name: str):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO vault_extras (site, key, value) VALUES (%s, %s, %s)",
-                    (site, key, value)
+                    "SELECT COALESCE(MAX(position), -1) + 1 FROM vault_extra_cols WHERE site = %s",
+                    (site,)
+                )
+                pos = cur.fetchone()[0]
+                cur.execute(
+                    "INSERT INTO vault_extra_cols (site, col_name, position) VALUES (%s, %s, %s)"
+                    " ON CONFLICT (site, col_name) DO NOTHING",
+                    (site, col_name, pos)
                 )
             conn.commit()
 
-    def update_extra(self, extra_id: int, key: str, value: str):
+    def delete_extra_col(self, site: str, col_name: str):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE vault_extras SET key = %s, value = %s WHERE id = %s",
-                    (key, value, extra_id)
+                    "DELETE FROM vault_extra_cols WHERE site = %s AND col_name = %s",
+                    (site, col_name)
+                )
+                cur.execute(
+                    "DELETE FROM vault_extras WHERE site = %s AND col_name = %s",
+                    (site, col_name)
                 )
             conn.commit()
 
-    def delete_extra(self, extra_id: int):
+    def get_extra_rows(self, site: str) -> Dict[int, Dict[str, str]]:
+        """Returns {row_num: {col_name: value}}."""
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM vault_extras WHERE id = %s", (extra_id,))
+                cur.execute(
+                    "SELECT row_num, col_name, value FROM vault_extras WHERE site = %s ORDER BY row_num",
+                    (site,)
+                )
+                rows: Dict[int, Dict[str, str]] = {}
+                for row_num, col_name, value in cur.fetchall():
+                    rows.setdefault(row_num, {})[col_name] = value
+                return rows
+
+    def add_extra_row(self, site: str) -> int:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(MAX(row_num), 0) + 1 FROM vault_extras WHERE site = %s",
+                    (site,)
+                )
+                new_row = cur.fetchone()[0]
             conn.commit()
+        return new_row
+
+    def set_extra_cell(self, site: str, row_num: int, col_name: str, value: str):
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO vault_extras (site, row_num, col_name, value) VALUES (%s, %s, %s, %s)"
+                    " ON CONFLICT (site, row_num, col_name) DO UPDATE SET value = EXCLUDED.value",
+                    (site, row_num, col_name, value)
+                )
+            conn.commit()
+
+    def delete_extra_row(self, site: str, row_num: int):
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM vault_extras WHERE site = %s AND row_num = %s",
+                    (site, row_num)
+                )
+            conn.commit()
+
+    def get_extras(self, site: str) -> List[Dict]:
+        """Returns row count as list for edit_pick_inline extras_count."""
+        rows = self.get_extra_rows(site)
+        return list(rows.keys())
