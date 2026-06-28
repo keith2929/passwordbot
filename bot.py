@@ -351,11 +351,13 @@ async def _show_edit_pick(send_fn, ctx):
     entry = ctx.user_data["entry"]
     edits = ctx.user_data.get("edits", {})
     extras = db.get_extras(site)
-    await send_fn(
+    msg = await send_fn(
         f"✏️ Editing *{site}* — tap a field to change it:",
         parse_mode="Markdown",
         reply_markup=edit_pick_inline(entry, edits, len(extras)),
     )
+    if hasattr(msg, "message_id"):
+        ctx.user_data["pick_msg_id"] = msg.message_id
     return EDIT_PICK
 
 
@@ -382,6 +384,22 @@ async def edit_value_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
         value = encrypt(MASTER_PASSWORD, value)
     ctx.user_data["edits"][col] = value
+    # Edit the existing pick message in place so old Save buttons stay valid
+    site = ctx.user_data["pending_site"]
+    entry = ctx.user_data["entry"]
+    edits = ctx.user_data["edits"]
+    extras = db.get_extras(site)
+    pick_msg_id = ctx.user_data.get("pick_msg_id")
+    if pick_msg_id:
+        try:
+            await ctx.bot.edit_message_reply_markup(
+                chat_id=update.effective_chat.id,
+                message_id=pick_msg_id,
+                reply_markup=edit_pick_inline(entry, edits, len(extras)),
+            )
+            return EDIT_PICK
+        except Exception:
+            pass
     return await _show_edit_pick(update.message.reply_text, ctx)
 
 
