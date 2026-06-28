@@ -41,15 +41,11 @@ class Database:
                     CREATE TABLE IF NOT EXISTS vault_extras (
                         id         SERIAL PRIMARY KEY,
                         site       TEXT NOT NULL REFERENCES vault(site) ON DELETE CASCADE,
-                        key        TEXT NOT NULL,
+                        key        TEXT NOT NULL DEFAULT '',
                         value      TEXT NOT NULL DEFAULT '',
-                        row_num    INTEGER NOT NULL DEFAULT 1,
                         created_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """)
-                cur.execute(
-                    "ALTER TABLE vault_extras ADD COLUMN IF NOT EXISTS row_num INTEGER NOT NULL DEFAULT 1"
-                )
             conn.commit()
 
     # Columns
@@ -132,104 +128,38 @@ class Database:
             conn.commit()
         return deleted
 
-    # Extras (column x row table model)
-
-    def get_extra_cols(self, site: str) -> List[str]:
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT DISTINCT key FROM vault_extras WHERE site = %s ORDER BY key",
-                    (site,)
-                )
-                return [r[0] for r in cur.fetchall()]
-
-    def get_extra_table(self, site: str) -> Dict[int, Dict[str, str]]:
-        """Returns {row_num: {col: value}}."""
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT row_num, key, value FROM vault_extras WHERE site = %s ORDER BY row_num, key",
-                    (site,)
-                )
-                table: Dict[int, Dict[str, str]] = {}
-                for row_num, key, value in cur.fetchall():
-                    table.setdefault(row_num, {})[key] = value
-                return table
-
-    def get_extra_col_values(self, site: str, col: str) -> List[Dict]:
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT row_num, value FROM vault_extras WHERE site = %s AND key = %s ORDER BY row_num",
-                    (site, col)
-                )
-                return [{"row_num": r[0], "value": r[1]} for r in cur.fetchall()]
-
-    def set_extra_cell(self, site: str, col: str, row_num: int, value: str):
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id FROM vault_extras WHERE site = %s AND key = %s AND row_num = %s",
-                    (site, col, row_num)
-                )
-                existing = cur.fetchone()
-                if existing:
-                    cur.execute("UPDATE vault_extras SET value = %s WHERE id = %s", (value, existing[0]))
-                else:
-                    cur.execute(
-                        "INSERT INTO vault_extras (site, key, value, row_num) VALUES (%s, %s, %s, %s)",
-                        (site, col, value, row_num)
-                    )
-            conn.commit()
-
-    def add_extra_col(self, site: str, col: str):
-        """Add a new column with empty cells for all existing rows (or row 1 if none)."""
-        table = self.get_extra_table(site)
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                rows_to_fill = list(table.keys()) if table else [1]
-                for row_num in rows_to_fill:
-                    cur.execute(
-                        "INSERT INTO vault_extras (site, key, value, row_num) VALUES (%s, %s, %s, %s)",
-                        (site, col, "", row_num)
-                    )
-            conn.commit()
-
-    def add_extra_row(self, site: str) -> int:
-        """Add a blank row for all existing columns. Returns new row_num."""
-        cols = self.get_extra_cols(site)
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT COALESCE(MAX(row_num), 0) FROM vault_extras WHERE site = %s", (site,)
-                )
-                new_row = cur.fetchone()[0] + 1
-                for col in cols:
-                    cur.execute(
-                        "INSERT INTO vault_extras (site, key, value, row_num) VALUES (%s, %s, %s, %s)",
-                        (site, col, "", new_row)
-                    )
-            conn.commit()
-        return new_row
-
-    def delete_extra_col(self, site: str, col: str):
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM vault_extras WHERE site = %s AND key = %s", (site, col))
-            conn.commit()
-
-    def delete_extra_row(self, site: str, row_num: int):
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM vault_extras WHERE site = %s AND row_num = %s", (site, row_num))
-            conn.commit()
-
-    def has_extras(self, site: str) -> bool:
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM vault_extras WHERE site = %s LIMIT 1", (site,))
-                return cur.fetchone() is not None
+    # ── Extras (question / answer rows) ──────────────────────
 
     def get_extras(self, site: str) -> List[Dict]:
-        """Compat shim: returns list of row dicts for extras_count in edit_pick_inline."""
-        return list(self.get_extra_table(site).values())
+        """Returns [{id, key, value}] ordered by id."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, key, value FROM vault_extras WHERE site = %s ORDER BY id",
+                    (site,)
+                )
+                return [{"id": r[0], "key": r[1], "value": r[2]} for r in cur.fetchall()]
+
+    def add_extra(self, site: str, key: str, value: str):
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO vault_extras (site, key, value) VALUES (%s, %s, %s)",
+                    (site, key, value)
+                )
+            conn.commit()
+
+    def update_extra(self, extra_id: int, key: str, value: str):
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE vault_extras SET key = %s, value = %s WHERE id = %s",
+                    (key, value, extra_id)
+                )
+            conn.commit()
+
+    def delete_extra(self, extra_id: int):
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM vault_extras WHERE id = %s", (extra_id,))
+            conn.commit()

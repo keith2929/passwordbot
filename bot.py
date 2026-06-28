@@ -32,11 +32,11 @@ ACTION         = 6
 EDIT_PICK      = 7
 EDIT_VALUE     = 8
 ADD_COL_NAME   = 9
-EXTRAS_MENU      = 10
-EXTRAS_ADD_COL   = 11
-EXTRAS_VIEW_COL  = 12
-EXTRAS_EDIT_CELL = 13
-EXTRAS_ADD_ROW   = 14
+EXTRAS_MENU       = 10
+EXTRAS_ADD_KEY    = 11
+EXTRAS_ADD_VAL    = 12
+EXTRAS_ROW        = 13
+EXTRAS_EDIT_FIELD = 14
 
 MENU_KB = ReplyKeyboardMarkup([["🔐 Menu"]], resize_keyboard=True)
 
@@ -96,25 +96,25 @@ def edit_pick_inline(entry: dict, edits: dict, extras_count: int) -> InlineKeybo
     return InlineKeyboardMarkup(buttons)
 
 
-def extras_menu_inline(cols: list, has_rows: bool) -> InlineKeyboardMarkup:
-    buttons = [[InlineKeyboardButton(f"📋 {col}", callback_data=f"extras_col:{col}")] for col in cols]
-    row = [InlineKeyboardButton("➕ Add Column", callback_data="extras_add_col")]
-    if cols:
-        row.append(InlineKeyboardButton("➕ Add Row", callback_data="extras_add_row"))
-    buttons.append(row)
+def extras_table_inline(rows: list) -> InlineKeyboardMarkup:
+    buttons = []
+    for i, r in enumerate(rows, 1):
+        q = (r["key"][:20] + "…") if len(r["key"]) > 20 else r["key"]
+        a = (r["value"][:20] + "…") if len(r["value"]) > 20 else r["value"]
+        label = f"{i}. {q} → {a or '(empty)'}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"extras_row:{r['id']}")])
+    buttons.append([InlineKeyboardButton("➕ Add Row", callback_data="extras_add_row")])
     buttons.append([InlineKeyboardButton("← Back to Edit", callback_data="extras_back")])
     return InlineKeyboardMarkup(buttons)
 
 
-def extras_col_inline(col: str, rows: list) -> InlineKeyboardMarkup:
-    buttons = []
-    for r in rows:
-        preview = (r["value"][:25] + "…") if len(r["value"]) > 25 else r["value"]
-        label = f"Row {r['row_num']}: {preview or '(empty)'}"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"extras_cell:{col}:{r['row_num']}")])
-    buttons.append([InlineKeyboardButton(f"🗑️ Delete column '{col}'", callback_data=f"extras_del_col:{col}")])
-    buttons.append([InlineKeyboardButton("← Back to Extras", callback_data="extras_menu_back")])
-    return InlineKeyboardMarkup(buttons)
+def extras_row_inline(row: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Edit Question", callback_data=f"extras_editkey:{row['id']}"),
+         InlineKeyboardButton("✏️ Edit Answer",   callback_data=f"extras_editval:{row['id']}")],
+        [InlineKeyboardButton("🗑️ Delete Row",    callback_data=f"extras_delrow:{row['id']}")],
+        [InlineKeyboardButton("← Back to Extras", callback_data="extras_menu_back")],
+    ])
 
 
 # ── START / MENU ──────────────────────────────────────────
@@ -433,18 +433,25 @@ async def edit_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── EXTRAS ────────────────────────────────────────────────
 
-def _extras_table_text(site: str, cols: list, table: dict) -> str:
-    if not cols:
-        return f"📊 *Extras for {site}*\nNo columns yet. Add a column to get started."
-    lines = [f"📊 *Extras for {site}*"]
-    lines.append("  ".join(f"*{c}*" for c in cols))
-    for row_num in sorted(table.keys()):
-        row = table[row_num]
-        cells = [row.get(c, "") or "(empty)" for c in cols]
-        lines.append(f"Row {row_num}: " + " | ".join(cells))
-    if not table:
-        lines.append("_No rows yet._")
+def _extras_text(site: str, rows: list) -> str:
+    if not rows:
+        return f"📊 *Extras for {site}*\n_No rows yet. Tap ➕ Add Row to get started._"
+    lines = [f"📊 *Extras for {site}*\n"]
+    lines.append("`No  Question              Answer`")
+    lines.append("`" + "─" * 38 + "`")
+    for i, r in enumerate(rows, 1):
+        q = (r["key"][:20] + "…") if len(r["key"]) > 20 else r["key"]
+        a = (r["value"][:20] + "…") if len(r["value"]) > 20 else r["value"]
+        lines.append(f"`{str(i).ljust(4)}{q.ljust(22)}{a}`")
     return "\n".join(lines)
+
+
+async def _show_extras_menu(send_fn, ctx):
+    site = ctx.user_data["pending_site"]
+    rows = db.get_extras(site)
+    text = _extras_text(site, rows)
+    await send_fn(text, parse_mode="Markdown", reply_markup=extras_table_inline(rows))
+    return EXTRAS_MENU
 
 
 async def edit_extras(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -452,122 +459,94 @@ async def edit_extras(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return await _show_extras_menu(update.callback_query.message.reply_text, ctx)
 
 
-async def _show_extras_menu(send_fn, ctx):
-    site = ctx.user_data["pending_site"]
-    cols = db.get_extra_cols(site)
-    table = db.get_extra_table(site)
-    text = _extras_table_text(site, cols, table)
-    await send_fn(text, parse_mode="Markdown", reply_markup=extras_menu_inline(cols, bool(table)))
-    return EXTRAS_MENU
-
-
-async def extras_add_col_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def extras_row_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    extra_id = int(update.callback_query.data.split(":", 1)[1])
+    site = ctx.user_data["pending_site"]
+    rows = db.get_extras(site)
+    row = next((r for r in rows if r["id"] == extra_id), None)
+    if not row:
+        return await _show_extras_menu(update.callback_query.message.reply_text, ctx)
+    ctx.user_data["extras_row"] = row
     await update.callback_query.message.reply_text(
-        "Enter the column name (e.g. *Question*, *Answer*, *Backup Code*):",
+        f"*Question:* {row['key'] or '(empty)'}\n*Answer:* {row['value'] or '(empty)'}",
+        parse_mode="Markdown",
+        reply_markup=extras_row_inline(row),
+    )
+    return EXTRAS_ROW
+
+
+async def extras_edit_key_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    extra_id = int(update.callback_query.data.split(":", 1)[1])
+    ctx.user_data["extras_editing_id"] = extra_id
+    ctx.user_data["extras_editing_field"] = "key"
+    row = ctx.user_data["extras_row"]
+    await update.callback_query.message.reply_text(
+        f"Enter new *Question*:\n_Current: {row['key'] or '(empty)'}_",
         parse_mode="Markdown",
     )
-    return EXTRAS_ADD_COL
+    return EXTRAS_EDIT_FIELD
 
 
-async def extras_add_col_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    site = ctx.user_data["pending_site"]
-    col = update.message.text.strip()
-    db.add_extra_col(site, col)
-    await update.message.reply_text(f"✅ Column *{col}* added.", parse_mode="Markdown")
+async def extras_edit_val_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    extra_id = int(update.callback_query.data.split(":", 1)[1])
+    ctx.user_data["extras_editing_id"] = extra_id
+    ctx.user_data["extras_editing_field"] = "value"
+    row = ctx.user_data["extras_row"]
+    await update.callback_query.message.reply_text(
+        f"Enter new *Answer*:\n_Current: {row['value'] or '(empty)'}_",
+        parse_mode="Markdown",
+    )
+    return EXTRAS_EDIT_FIELD
+
+
+async def extras_edit_field_value(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    extra_id = ctx.user_data["extras_editing_id"]
+    field = ctx.user_data["extras_editing_field"]
+    new_val = update.message.text.strip()
+    row = ctx.user_data["extras_row"].copy()
+    row[field] = new_val
+    ctx.user_data["extras_row"] = row
+    db.update_extra(extra_id, row["key"], row["value"])
+    await update.message.reply_text("✅ Updated.")
     return await _show_extras_menu(update.message.reply_text, ctx)
 
 
-async def extras_view_col(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def extras_del_row(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    col = update.callback_query.data.split(":", 1)[1]
-    ctx.user_data["extras_viewing_col"] = col
-    site = ctx.user_data["pending_site"]
-    rows = db.get_extra_col_values(site, col)
-    await update.callback_query.message.reply_text(
-        f"📋 *{col}* — tap a row to edit:",
-        parse_mode="Markdown",
-        reply_markup=extras_col_inline(col, rows),
-    )
-    return EXTRAS_VIEW_COL
-
-
-async def extras_edit_cell_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    _, col, row_num = update.callback_query.data.split(":", 2)
-    ctx.user_data["extras_editing_col"] = col
-    ctx.user_data["extras_editing_row"] = int(row_num)
-    site = ctx.user_data["pending_site"]
-    current = db.get_extra_col_values(site, col)
-    cur_val = next((r["value"] for r in current if r["row_num"] == int(row_num)), "")
-    await update.callback_query.message.reply_text(
-        f"Enter new value for *{col}* (Row {row_num}):\n_Current: {cur_val or '(empty)'}_",
-        parse_mode="Markdown",
-    )
-    return EXTRAS_EDIT_CELL
-
-
-async def extras_edit_cell_value(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    site = ctx.user_data["pending_site"]
-    col = ctx.user_data["extras_editing_col"]
-    row_num = ctx.user_data["extras_editing_row"]
-    value = update.message.text.strip()
-    db.set_extra_cell(site, col, row_num, value)
-    await update.message.reply_text(f"✅ Updated.", parse_mode="Markdown")
-    rows = db.get_extra_col_values(site, col)
-    await update.message.reply_text(
-        f"📋 *{col}* — tap a row to edit:",
-        parse_mode="Markdown",
-        reply_markup=extras_col_inline(col, rows),
-    )
-    return EXTRAS_VIEW_COL
+    extra_id = int(update.callback_query.data.split(":", 1)[1])
+    db.delete_extra(extra_id)
+    await update.callback_query.message.reply_text("🗑️ Row deleted.")
+    return await _show_extras_menu(update.callback_query.message.reply_text, ctx)
 
 
 async def extras_add_row_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    site = ctx.user_data["pending_site"]
-    cols = db.get_extra_cols(site)
-    if not cols:
-        await update.callback_query.message.reply_text("Add a column first.")
-        return EXTRAS_MENU
-    new_row = db.add_extra_row(site)
-    ctx.user_data["extras_new_row"] = new_row
-    ctx.user_data["extras_row_queue"] = list(cols)
-    col = ctx.user_data["extras_row_queue"].pop(0)
-    ctx.user_data["extras_filling_col"] = col
     await update.callback_query.message.reply_text(
-        f"Row {new_row} — Enter value for *{col}*:",
+        "Enter the *Question* (e.g. _What is your pet's name?_):",
         parse_mode="Markdown",
     )
-    return EXTRAS_ADD_ROW
+    return EXTRAS_ADD_KEY
 
 
-async def extras_add_row_value(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def extras_add_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["extras_new_key"] = update.message.text.strip()
+    await update.message.reply_text(
+        f"Now enter the *Answer*:",
+        parse_mode="Markdown",
+    )
+    return EXTRAS_ADD_VAL
+
+
+async def extras_add_val(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     site = ctx.user_data["pending_site"]
-    row_num = ctx.user_data["extras_new_row"]
-    col = ctx.user_data["extras_filling_col"]
+    key = ctx.user_data["extras_new_key"]
     value = update.message.text.strip()
-    db.set_extra_cell(site, col, row_num, value)
-    queue = ctx.user_data["extras_row_queue"]
-    if queue:
-        next_col = queue.pop(0)
-        ctx.user_data["extras_filling_col"] = next_col
-        await update.message.reply_text(
-            f"Row {row_num} — Enter value for *{next_col}*:",
-            parse_mode="Markdown",
-        )
-        return EXTRAS_ADD_ROW
-    await update.message.reply_text(f"✅ Row {row_num} added.")
+    db.add_extra(site, key, value)
+    await update.message.reply_text("✅ Row added.")
     return await _show_extras_menu(update.message.reply_text, ctx)
-
-
-async def extras_del_col(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    col = update.callback_query.data.split(":", 1)[1]
-    site = ctx.user_data["pending_site"]
-    db.delete_extra_col(site, col)
-    await update.callback_query.message.reply_text(f"🗑️ Column *{col}* deleted.", parse_mode="Markdown")
-    return await _show_extras_menu(update.callback_query.message.reply_text, ctx)
 
 
 async def extras_menu_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -733,24 +712,24 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value_input),
             ],
             EXTRAS_MENU: [
-                CallbackQueryHandler(extras_add_col_start, pattern="^extras_add_col$"),
+                CallbackQueryHandler(extras_row_pick,      pattern="^extras_row:"),
                 CallbackQueryHandler(extras_add_row_start, pattern="^extras_add_row$"),
-                CallbackQueryHandler(extras_view_col,      pattern="^extras_col:"),
                 CallbackQueryHandler(extras_back,          pattern="^extras_back$"),
             ],
-            EXTRAS_ADD_COL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, extras_add_col_name),
+            EXTRAS_ROW: [
+                CallbackQueryHandler(extras_edit_key_start, pattern="^extras_editkey:"),
+                CallbackQueryHandler(extras_edit_val_start, pattern="^extras_editval:"),
+                CallbackQueryHandler(extras_del_row,        pattern="^extras_delrow:"),
+                CallbackQueryHandler(extras_menu_back,      pattern="^extras_menu_back$"),
             ],
-            EXTRAS_VIEW_COL: [
-                CallbackQueryHandler(extras_edit_cell_start, pattern="^extras_cell:"),
-                CallbackQueryHandler(extras_del_col,         pattern="^extras_del_col:"),
-                CallbackQueryHandler(extras_menu_back,       pattern="^extras_menu_back$"),
+            EXTRAS_EDIT_FIELD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, extras_edit_field_value),
             ],
-            EXTRAS_EDIT_CELL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, extras_edit_cell_value),
+            EXTRAS_ADD_KEY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, extras_add_key),
             ],
-            EXTRAS_ADD_ROW: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, extras_add_row_value),
+            EXTRAS_ADD_VAL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, extras_add_val),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
