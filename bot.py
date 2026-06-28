@@ -25,15 +25,27 @@ db = Database()
 
 # Conversation states
 SITE, USERNAME, PASSWORD = range(3)
-GET_SITE      = 3
-DELETE_SITE   = 4
-MASTER_CONFIRM = 5
-SEARCH        = 6
-ACTION        = 7
-EDIT_USERNAME = 8
-EDIT_PASSWORD = 9
+DELETE_SITE    = 3
+MASTER_CONFIRM = 4
+SEARCH         = 5
+ACTION         = 6
+EDIT_PICK      = 7
+EDIT_VALUE     = 8
+ADD_COL_NAME   = 9
 
 MENU_KB = ReplyKeyboardMarkup([["🔐 Menu"]], resize_keyboard=True)
+
+# Columns where the value should never be shown in button labels
+_SENSITIVE_COLS = {"password"}
+
+# Emoji labels for known columns
+_COL_EMOJI = {
+    "username": "👤",
+    "password": "🔒",
+    "type":     "🏷️",
+    "website":  "🌐",
+    "notes":    "📝",
+}
 
 
 def is_allowed(update: Update) -> bool:
@@ -42,11 +54,12 @@ def is_allowed(update: Update) -> bool:
 
 def menu_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add",          callback_data="add"),
-         InlineKeyboardButton("🔍 Search",       callback_data="search")],
-        [InlineKeyboardButton("📋 List",          callback_data="list"),
-         InlineKeyboardButton("🗑️ Delete",        callback_data="delete")],
-        [InlineKeyboardButton("📥 Import Excel",  callback_data="import")],
+        [InlineKeyboardButton("➕ Add",         callback_data="add"),
+         InlineKeyboardButton("🔍 Search",      callback_data="search")],
+        [InlineKeyboardButton("📋 List",         callback_data="list"),
+         InlineKeyboardButton("🗑️ Delete",       callback_data="delete")],
+        [InlineKeyboardButton("📥 Import Excel", callback_data="import"),
+         InlineKeyboardButton("⚙️ Columns",      callback_data="columns")],
     ])
 
 
@@ -58,17 +71,25 @@ def sites_inline(sites: list) -> InlineKeyboardMarkup:
 
 def action_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👁 Reveal Password", callback_data="action_reveal"),
-         InlineKeyboardButton("✏️ Edit",            callback_data="action_edit")],
+        [InlineKeyboardButton("👁 Reveal",  callback_data="action_reveal"),
+         InlineKeyboardButton("✏️ Edit",    callback_data="action_edit")],
     ])
 
 
-def edit_field_inline() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 Username", callback_data="edit_username"),
-         InlineKeyboardButton("🔒 Password", callback_data="edit_password")],
-        [InlineKeyboardButton("📝 Both",     callback_data="edit_both")],
-    ])
+def edit_pick_inline(entry: dict, edits: dict) -> InlineKeyboardMarkup:
+    """Shows one button per column with current (or pending) value."""
+    buttons = []
+    for col, val in entry.items():
+        current = edits.get(col, val) or ""
+        emoji = _COL_EMOJI.get(col, "•")
+        if col in _SENSITIVE_COLS:
+            label = f"{emoji} {col}: {'(changed)' if col in edits else '••••••••'}"
+        else:
+            preview = (current[:20] + "…") if len(current) > 20 else current
+            label = f"{emoji} {col}: {preview or '(empty)'}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"editcol:{col}")])
+    buttons.append([InlineKeyboardButton("✅ Save Changes", callback_data="edit_save")])
+    return InlineKeyboardMarkup(buttons)
 
 
 # ── START / MENU ──────────────────────────────────────────
@@ -124,8 +145,10 @@ async def add_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
     site = ctx.user_data["site"]
-    username = ctx.user_data["username"]
-    db.save_entry(site, username, encrypt(MASTER_PASSWORD, password))
+    db.save_entry(site, {
+        "username": ctx.user_data["username"],
+        "password": encrypt(MASTER_PASSWORD, password),
+    })
     await ctx.bot.send_message(
         update.effective_chat.id,
         f"✅ Saved *{site}*.",
@@ -155,6 +178,39 @@ async def list_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ── COLUMNS MANAGEMENT ────────────────────────────────────
+
+async def columns_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    cols = db.get_columns()
+    text = "⚙️ *Current columns:*\n" + "\n".join(f"• {c}" for c in cols)
+    await update.callback_query.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add Column", callback_data="add_column")]
+        ]),
+    )
+
+
+async def add_column_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "Enter the new column name (letters, numbers, underscores only):"
+    )
+    return ADD_COL_NAME
+
+
+async def add_column_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    try:
+        clean = db.add_column(name)
+        await update.message.reply_text(f"✅ Column *{clean}* added.", parse_mode="Markdown")
+    except ValueError as e:
+        await update.message.reply_text(f"❌ {e}")
+    return ConversationHandler.END
+
+
 # ── SEARCH ────────────────────────────────────────────────
 
 async def search_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -172,13 +228,7 @@ async def search_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ No matches for *{query}*.", parse_mode="Markdown")
         return ConversationHandler.END
     if len(results) == 1:
-        ctx.user_data["pending_site"] = results[0]
-        msg = await update.message.reply_text(
-            "🔑 Enter master password:\n_Message will be deleted immediately._",
-            parse_mode="Markdown",
-        )
-        ctx.user_data["prompt_msg_id"] = msg.message_id
-        return MASTER_CONFIRM
+        return await _ask_master(update.message.reply_text, ctx, results[0])
     await update.message.reply_text(
         f"Found {len(results)} matches — tap one:",
         reply_markup=sites_inline(results),
@@ -189,11 +239,15 @@ async def search_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── SITE SELECTED → MASTER PASSWORD ───────────────────────
 
 async def site_selected(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    site = query.data.split(":", 1)[1]
+    await update.callback_query.answer()
+    site = update.callback_query.data.split(":", 1)[1]
+    return await _ask_master(update.callback_query.message.reply_text, ctx, site)
+
+
+async def _ask_master(send_fn, ctx, site: str):
     ctx.user_data["pending_site"] = site
-    msg = await query.message.reply_text(
+    ctx.user_data["edits"] = {}
+    msg = await send_fn(
         "🔑 Enter master password:\n_Message will be deleted immediately._",
         parse_mode="Markdown",
     )
@@ -241,16 +295,18 @@ async def master_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def action_reveal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     site = ctx.user_data["pending_site"]
-    username, enc_pass, type_, website, notes = ctx.user_data["entry"]
-    password = decrypt(MASTER_PASSWORD, enc_pass)
+    entry = ctx.user_data["entry"]
 
-    lines = [f"🔑 *{site}*", f"👤 `{username}`", f"🔒 `{password}`"]
-    if type_:
-        lines.append(f"🏷️ {type_}")
-    if website:
-        lines.append(f"🌐 {website}")
-    if notes:
-        lines.append(f"📝 {notes}")
+    lines = [f"🔑 *{site}*"]
+    for col, val in entry.items():
+        if not val:
+            continue
+        emoji = _COL_EMOJI.get(col, "•")
+        if col == "password":
+            display = decrypt(MASTER_PASSWORD, val)
+            lines.append(f"{emoji} `{display}`")
+        else:
+            lines.append(f"{emoji} {col}: `{val}`")
     lines.append("\n_Self-deletes in 30s_")
 
     msg = await update.callback_query.message.reply_text(
@@ -272,73 +328,62 @@ async def action_reveal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def action_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     site = ctx.user_data["pending_site"]
+    entry = ctx.user_data["entry"]
+    edits = ctx.user_data.get("edits", {})
     await update.callback_query.message.reply_text(
-        f"✏️ Editing *{site}* — what would you like to update?",
+        f"✏️ Editing *{site}* — tap a field to change it:",
         parse_mode="Markdown",
-        reply_markup=edit_field_inline(),
+        reply_markup=edit_pick_inline(entry, edits),
     )
-    return ACTION
+    return EDIT_PICK
 
 
-async def edit_choose_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def edit_col_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    ctx.user_data["edit_fields"] = ["username"]
-    await update.callback_query.message.reply_text("Enter new username or email:")
-    return EDIT_USERNAME
+    col = update.callback_query.data.split(":", 1)[1]
+    ctx.user_data["editing_col"] = col
+    if col in _SENSITIVE_COLS:
+        prompt = f"Enter new value for *{col}*:\n_Message will be deleted immediately._"
+    else:
+        current = ctx.user_data["edits"].get(col) or ctx.user_data["entry"].get(col, "")
+        prompt = f"Enter new value for *{col}*:\n_Current: {current or '(empty)'}_"
+    await update.callback_query.message.reply_text(prompt, parse_mode="Markdown")
+    return EDIT_VALUE
 
 
-async def edit_choose_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def edit_value_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    col = ctx.user_data["editing_col"]
+    value = update.message.text.strip()
+
+    if col in _SENSITIVE_COLS:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        value = encrypt(MASTER_PASSWORD, value)
+
+    ctx.user_data["edits"][col] = value
+
+    entry = ctx.user_data["entry"]
+    edits = ctx.user_data["edits"]
+    await update.message.reply_text(
+        f"✏️ Editing *{ctx.user_data['pending_site']}* — tap a field to change it:",
+        parse_mode="Markdown",
+        reply_markup=edit_pick_inline(entry, edits),
+    )
+    return EDIT_PICK
+
+
+async def edit_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    ctx.user_data["edit_fields"] = ["password"]
+    site = ctx.user_data["pending_site"]
+    edits = ctx.user_data.get("edits", {})
+    if not edits:
+        await update.callback_query.message.reply_text("No changes made.")
+        return ConversationHandler.END
+    db.save_entry(site, edits)
     await update.callback_query.message.reply_text(
-        "Enter new password:\n_Message will be deleted immediately._",
-        parse_mode="Markdown",
-    )
-    return EDIT_PASSWORD
-
-
-async def edit_choose_both(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    ctx.user_data["edit_fields"] = ["username", "password"]
-    await update.callback_query.message.reply_text("Enter new username or email:")
-    return EDIT_USERNAME
-
-
-async def edit_username_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["new_username"] = update.message.text.strip()
-    if "password" in ctx.user_data.get("edit_fields", []):
-        await update.message.reply_text(
-            "Enter new password:\n_Message will be deleted immediately._",
-            parse_mode="Markdown",
-        )
-        return EDIT_PASSWORD
-    # username only — save now
-    site = ctx.user_data["pending_site"]
-    _, enc_pass, type_, website, notes = ctx.user_data["entry"]
-    db.save_entry(
-        site, ctx.user_data["new_username"], enc_pass,
-        type_=type_, website=website, notes=notes,
-    )
-    await update.message.reply_text(f"✅ Username updated for *{site}*.", parse_mode="Markdown")
-    return ConversationHandler.END
-
-
-async def edit_password_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    new_password = update.message.text.strip()
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-    site = ctx.user_data["pending_site"]
-    _, _, type_, website, notes = ctx.user_data["entry"]
-    username = ctx.user_data.get("new_username") or ctx.user_data["entry"][0]
-    db.save_entry(
-        site, username, encrypt(MASTER_PASSWORD, new_password),
-        type_=type_, website=website, notes=notes,
-    )
-    await ctx.bot.send_message(
-        update.effective_chat.id,
-        f"✅ Entry updated for *{site}*.",
+        f"✅ *{site}* updated ({len(edits)} field{'s' if len(edits) != 1 else ''} changed).",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
@@ -370,10 +415,12 @@ async def delete_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def import_prompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    cols = db.get_columns()
     await update.callback_query.message.reply_text(
-        "📥 Send me your Excel file (.xlsx)\n"
-        "Required columns: *name, username, password*\n"
-        "Optional: *type, website*",
+        f"📥 Send me your Excel file (.xlsx)\n"
+        f"*Required column:* name\n"
+        f"*Available columns:* {', '.join(cols)}\n"
+        f"Missing fields will be set to empty.",
         parse_mode="Markdown",
     )
 
@@ -390,37 +437,44 @@ async def import_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     buf = io.BytesIO()
     await file.download_to_memory(buf)
     buf.seek(0)
+
     wb = openpyxl.load_workbook(buf, read_only=True, data_only=True)
     ws = wb.active
     rows = ws.iter_rows(values_only=True)
     raw_headers = next(rows)
     headers = [str(h).strip().lower() if h is not None else "" for h in raw_headers]
-    col = {h: i for i, h in enumerate(headers)}
-    required = {"name", "username", "password"}
-    if not required.issubset(col):
-        missing = required - set(col)
-        await update.message.reply_text(
-            f"❌ Missing columns: {', '.join(missing)}\nFound: {', '.join(h for h in headers if h)}"
-        )
+    col_index = {h: i for i, h in enumerate(headers)}
+
+    if "name" not in col_index:
+        await update.message.reply_text("❌ Missing required column: name")
         return
+
+    db_cols = db.get_columns()
     imported = skipped = 0
+
     for row in rows:
         def cell(key):
-            return str(row[col[key]]).strip() if key in col and row[col[key]] is not None else ""
+            return str(row[col_index[key]]).strip() if key in col_index and row[col_index[key]] is not None else ""
+
         name = cell("name").lower()
-        username = cell("username")
-        password = cell("password")
-        if not name or not username or not password:
+        if not name:
             skipped += 1
             continue
-        db.save_entry(
-            name, username, encrypt(MASTER_PASSWORD, password),
-            type_=cell("type"), website=cell("website"),
-        )
+
+        fields = {}
+        for col in db_cols:
+            if col == "password":
+                raw = cell("password")
+                fields["password"] = encrypt(MASTER_PASSWORD, raw) if raw else ""
+            else:
+                fields[col] = cell(col)
+
+        db.save_entry(name, fields)
         imported += 1
+
     await update.message.reply_text(
         f"✅ Imported {imported} entr{'y' if imported == 1 else 'ies'}."
-        + (f" Skipped {skipped} incomplete rows." if skipped else "")
+        + (f" Skipped {skipped} rows with no name." if skipped else "")
     )
 
 
@@ -464,24 +518,36 @@ def main():
         per_message=False,
     )
 
-    # Handles site: callbacks and search → master confirm → reveal/edit
+    col_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(add_column_start, pattern="^add_column$"),
+        ],
+        states={
+            ADD_COL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_column_name)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=False,
+    )
+
     vault_conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(site_selected,  pattern="^site:"),
-            CallbackQueryHandler(search_start,   pattern="^search$"),
+            CallbackQueryHandler(site_selected, pattern="^site:"),
+            CallbackQueryHandler(search_start,  pattern="^search$"),
         ],
         states={
             SEARCH:         [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query)],
             MASTER_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, master_confirm)],
             ACTION: [
-                CallbackQueryHandler(action_reveal,       pattern="^action_reveal$"),
-                CallbackQueryHandler(action_edit,         pattern="^action_edit$"),
-                CallbackQueryHandler(edit_choose_username, pattern="^edit_username$"),
-                CallbackQueryHandler(edit_choose_password, pattern="^edit_password$"),
-                CallbackQueryHandler(edit_choose_both,    pattern="^edit_both$"),
+                CallbackQueryHandler(action_reveal,  pattern="^action_reveal$"),
+                CallbackQueryHandler(action_edit,    pattern="^action_edit$"),
             ],
-            EDIT_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_username_input)],
-            EDIT_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_password_input)],
+            EDIT_PICK: [
+                CallbackQueryHandler(edit_col_pick, pattern="^editcol:"),
+                CallbackQueryHandler(edit_save,     pattern="^edit_save$"),
+            ],
+            EDIT_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value_input),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_message=False,
@@ -502,10 +568,12 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_handler))
     app.add_handler(MessageHandler(filters.Text(["🔐 Menu"]), show_menu))
-    app.add_handler(CallbackQueryHandler(list_handler,    pattern="^list$"))
-    app.add_handler(CallbackQueryHandler(import_prompt,   pattern="^import$"))
+    app.add_handler(CallbackQueryHandler(list_handler,   pattern="^list$"))
+    app.add_handler(CallbackQueryHandler(columns_menu,   pattern="^columns$"))
+    app.add_handler(CallbackQueryHandler(import_prompt,  pattern="^import$"))
     app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), import_excel))
     app.add_handler(add_conv)
+    app.add_handler(col_conv)
     app.add_handler(vault_conv)
     app.add_handler(delete_conv)
 
