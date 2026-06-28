@@ -32,13 +32,14 @@ ACTION         = 6
 EDIT_PICK      = 7
 EDIT_VALUE     = 8
 ADD_COL_NAME   = 9
+EXTRAS_MENU    = 10
+EXTRAS_ADD_KEY = 11
+EXTRAS_ADD_VAL = 12
 
 MENU_KB = ReplyKeyboardMarkup([["🔐 Menu"]], resize_keyboard=True)
 
-# Columns where the value should never be shown in button labels
 _SENSITIVE_COLS = {"password"}
 
-# Emoji labels for known columns
 _COL_EMOJI = {
     "username": "👤",
     "password": "🔒",
@@ -76,8 +77,7 @@ def action_inline() -> InlineKeyboardMarkup:
     ])
 
 
-def edit_pick_inline(entry: dict, edits: dict) -> InlineKeyboardMarkup:
-    """Shows one button per column with current (or pending) value."""
+def edit_pick_inline(entry: dict, edits: dict, extras_count: int) -> InlineKeyboardMarkup:
     buttons = []
     for col, val in entry.items():
         current = edits.get(col, val) or ""
@@ -88,7 +88,19 @@ def edit_pick_inline(entry: dict, edits: dict) -> InlineKeyboardMarkup:
             preview = (current[:20] + "…") if len(current) > 20 else current
             label = f"{emoji} {col}: {preview or '(empty)'}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"editcol:{col}")])
+    extras_label = f"📎 Extras ({extras_count})" if extras_count else "📎 Extras (none)"
+    buttons.append([InlineKeyboardButton(extras_label, callback_data="edit_extras")])
     buttons.append([InlineKeyboardButton("✅ Save Changes", callback_data="edit_save")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def extras_inline(extras: list) -> InlineKeyboardMarkup:
+    buttons = []
+    for ex in extras:
+        label = f"🗑️ {ex['key']}: {ex['value'][:30]}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"del_extra:{ex['id']}")])
+    buttons.append([InlineKeyboardButton("➕ Add Extra", callback_data="add_extra")])
+    buttons.append([InlineKeyboardButton("← Back to Edit", callback_data="extras_back")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -157,7 +169,7 @@ async def add_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── LIST (tappable) ───────────────────────────────────────
+# ── LIST ──────────────────────────────────────────────────
 
 async def list_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
@@ -274,9 +286,7 @@ async def master_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     entry = db.get_entry(site)
     if not entry:
         await ctx.bot.send_message(
-            update.effective_chat.id,
-            f"❌ No entry for *{site}*.",
-            parse_mode="Markdown",
+            update.effective_chat.id, f"❌ No entry for *{site}*.", parse_mode="Markdown"
         )
         return ConversationHandler.END
 
@@ -290,12 +300,13 @@ async def master_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ACTION
 
 
-# ── ACTION: REVEAL ─────────────────────────────────────────
+# ── REVEAL ────────────────────────────────────────────────
 
 async def action_reveal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     site = ctx.user_data["pending_site"]
     entry = ctx.user_data["entry"]
+    extras = db.get_extras(site)
 
     lines = [f"🔑 *{site}*"]
     for col, val in entry.items():
@@ -303,10 +314,15 @@ async def action_reveal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             continue
         emoji = _COL_EMOJI.get(col, "•")
         if col == "password":
-            display = decrypt(MASTER_PASSWORD, val)
-            lines.append(f"{emoji} `{display}`")
+            lines.append(f"{emoji} `{decrypt(MASTER_PASSWORD, val)}`")
         else:
             lines.append(f"{emoji} {col}: `{val}`")
+
+    if extras:
+        lines.append("\n📎 *Extras — refer to table:*")
+        for ex in extras:
+            lines.append(f"  • {ex['key']}: `{ex['value']}`")
+
     lines.append("\n_Self-deletes in 30s_")
 
     msg = await update.callback_query.message.reply_text(
@@ -323,17 +339,22 @@ async def action_reveal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── ACTION: EDIT ───────────────────────────────────────────
+# ── EDIT ──────────────────────────────────────────────────
 
 async def action_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    return await _show_edit_pick(update.callback_query.message.reply_text, ctx)
+
+
+async def _show_edit_pick(send_fn, ctx):
     site = ctx.user_data["pending_site"]
     entry = ctx.user_data["entry"]
     edits = ctx.user_data.get("edits", {})
-    await update.callback_query.message.reply_text(
+    extras = db.get_extras(site)
+    await send_fn(
         f"✏️ Editing *{site}* — tap a field to change it:",
         parse_mode="Markdown",
-        reply_markup=edit_pick_inline(entry, edits),
+        reply_markup=edit_pick_inline(entry, edits, len(extras)),
     )
     return EDIT_PICK
 
@@ -354,24 +375,14 @@ async def edit_col_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def edit_value_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     col = ctx.user_data["editing_col"]
     value = update.message.text.strip()
-
     if col in _SENSITIVE_COLS:
         try:
             await update.message.delete()
         except Exception:
             pass
         value = encrypt(MASTER_PASSWORD, value)
-
     ctx.user_data["edits"][col] = value
-
-    entry = ctx.user_data["entry"]
-    edits = ctx.user_data["edits"]
-    await update.message.reply_text(
-        f"✏️ Editing *{ctx.user_data['pending_site']}* — tap a field to change it:",
-        parse_mode="Markdown",
-        reply_markup=edit_pick_inline(entry, edits),
-    )
-    return EDIT_PICK
+    return await _show_edit_pick(update.message.reply_text, ctx)
 
 
 async def edit_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -387,6 +398,71 @@ async def edit_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
     return ConversationHandler.END
+
+
+# ── EXTRAS ────────────────────────────────────────────────
+
+async def edit_extras(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    return await _show_extras_menu(update.callback_query.message.reply_text, ctx)
+
+
+async def _show_extras_menu(send_fn, ctx):
+    site = ctx.user_data["pending_site"]
+    extras = db.get_extras(site)
+    if extras:
+        lines = [f"📎 *Extras for {site}:*"]
+        for ex in extras:
+            lines.append(f"• {ex['key']}: `{ex['value']}`")
+        text = "\n".join(lines)
+    else:
+        text = f"📎 *Extras for {site}:*\nNo extras yet."
+    await send_fn(
+        text,
+        parse_mode="Markdown",
+        reply_markup=extras_inline(extras),
+    )
+    return EXTRAS_MENU
+
+
+async def add_extra_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "Enter the key name (e.g. *backup code*, *security question*):",
+        parse_mode="Markdown",
+    )
+    return EXTRAS_ADD_KEY
+
+
+async def extras_add_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["extra_key"] = update.message.text.strip()
+    await update.message.reply_text(
+        f"Enter the value for *{ctx.user_data['extra_key']}*:",
+        parse_mode="Markdown",
+    )
+    return EXTRAS_ADD_VAL
+
+
+async def extras_add_value(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    site = ctx.user_data["pending_site"]
+    key = ctx.user_data["extra_key"]
+    value = update.message.text.strip()
+    db.add_extra(site, key, value)
+    await update.message.reply_text(f"✅ Added extra: *{key}*", parse_mode="Markdown")
+    return await _show_extras_menu(update.message.reply_text, ctx)
+
+
+async def del_extra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    extra_id = int(update.callback_query.data.split(":", 1)[1])
+    db.delete_extra(extra_id)
+    await update.callback_query.message.reply_text("🗑️ Deleted.")
+    return await _show_extras_menu(update.callback_query.message.reply_text, ctx)
+
+
+async def extras_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    return await _show_edit_pick(update.callback_query.message.reply_text, ctx)
 
 
 # ── DELETE ────────────────────────────────────────────────
@@ -437,30 +513,24 @@ async def import_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     buf = io.BytesIO()
     await file.download_to_memory(buf)
     buf.seek(0)
-
     wb = openpyxl.load_workbook(buf, read_only=True, data_only=True)
     ws = wb.active
     rows = ws.iter_rows(values_only=True)
     raw_headers = next(rows)
     headers = [str(h).strip().lower() if h is not None else "" for h in raw_headers]
     col_index = {h: i for i, h in enumerate(headers)}
-
     if "name" not in col_index:
         await update.message.reply_text("❌ Missing required column: name")
         return
-
     db_cols = db.get_columns()
     imported = skipped = 0
-
     for row in rows:
         def cell(key):
             return str(row[col_index[key]]).strip() if key in col_index and row[col_index[key]] is not None else ""
-
         name = cell("name").lower()
         if not name:
             skipped += 1
             continue
-
         fields = {}
         for col in db_cols:
             if col == "password":
@@ -468,10 +538,8 @@ async def import_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 fields["password"] = encrypt(MASTER_PASSWORD, raw) if raw else ""
             else:
                 fields[col] = cell(col)
-
         db.save_entry(name, fields)
         imported += 1
-
     await update.message.reply_text(
         f"✅ Imported {imported} entr{'y' if imported == 1 else 'ies'}."
         + (f" Skipped {skipped} rows with no name." if skipped else "")
@@ -538,16 +606,24 @@ def main():
             SEARCH:         [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query)],
             MASTER_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, master_confirm)],
             ACTION: [
-                CallbackQueryHandler(action_reveal,  pattern="^action_reveal$"),
-                CallbackQueryHandler(action_edit,    pattern="^action_edit$"),
+                CallbackQueryHandler(action_reveal, pattern="^action_reveal$"),
+                CallbackQueryHandler(action_edit,   pattern="^action_edit$"),
             ],
             EDIT_PICK: [
                 CallbackQueryHandler(edit_col_pick, pattern="^editcol:"),
+                CallbackQueryHandler(edit_extras,   pattern="^edit_extras$"),
                 CallbackQueryHandler(edit_save,     pattern="^edit_save$"),
             ],
             EDIT_VALUE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value_input),
             ],
+            EXTRAS_MENU: [
+                CallbackQueryHandler(add_extra_start, pattern="^add_extra$"),
+                CallbackQueryHandler(del_extra,       pattern="^del_extra:"),
+                CallbackQueryHandler(extras_back,     pattern="^extras_back$"),
+            ],
+            EXTRAS_ADD_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, extras_add_key)],
+            EXTRAS_ADD_VAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, extras_add_value)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_message=False,
@@ -568,9 +644,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_handler))
     app.add_handler(MessageHandler(filters.Text(["🔐 Menu"]), show_menu))
-    app.add_handler(CallbackQueryHandler(list_handler,   pattern="^list$"))
-    app.add_handler(CallbackQueryHandler(columns_menu,   pattern="^columns$"))
-    app.add_handler(CallbackQueryHandler(import_prompt,  pattern="^import$"))
+    app.add_handler(CallbackQueryHandler(list_handler,  pattern="^list$"))
+    app.add_handler(CallbackQueryHandler(columns_menu,  pattern="^columns$"))
+    app.add_handler(CallbackQueryHandler(import_prompt, pattern="^import$"))
     app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), import_excel))
     app.add_handler(add_conv)
     app.add_handler(col_conv)

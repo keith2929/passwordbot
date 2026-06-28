@@ -2,11 +2,9 @@ import os
 import re
 from typing import Optional, List, Dict
 import psycopg2
-from psycopg2.extras import RealDictCursor
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-# Columns managed by the system — never shown or edited by the user
 _SYSTEM_COLS = {"site", "created_at", "updated_at"}
 
 
@@ -39,10 +37,20 @@ class Database:
                     ("notes",   "TEXT DEFAULT ''"),
                 ]:
                     cur.execute(f"ALTER TABLE vault ADD COLUMN IF NOT EXISTS {col} {defn}")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS vault_extras (
+                        id         SERIAL PRIMARY KEY,
+                        site       TEXT NOT NULL REFERENCES vault(site) ON DELETE CASCADE,
+                        key        TEXT NOT NULL,
+                        value      TEXT NOT NULL,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
             conn.commit()
 
+    # ── Columns ───────────────────────────────────────────
+
     def get_columns(self) -> List[str]:
-        """Returns user-editable columns in table order."""
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -54,7 +62,6 @@ class Database:
                 return [r[0] for r in cur.fetchall()]
 
     def add_column(self, col_name: str) -> str:
-        """Adds a new TEXT column. Returns the sanitized name."""
         clean = re.sub(r'[^a-z0-9_]', '_', col_name.lower().strip())
         if not clean or clean[0].isdigit() or clean in _SYSTEM_COLS:
             raise ValueError(f"Invalid column name: {col_name!r}")
@@ -64,11 +71,9 @@ class Database:
             conn.commit()
         return clean
 
+    # ── Vault entries ─────────────────────────────────────
+
     def save_entry(self, site: str, fields: Dict[str, str]):
-        """
-        Upsert an entry. `fields` is a dict of column→value.
-        Only columns that exist in the table are written.
-        """
         existing = set(self.get_columns())
         safe = {k: v for k, v in fields.items() if k in existing}
         if not safe:
@@ -119,3 +124,37 @@ class Database:
                 deleted = cur.rowcount > 0
             conn.commit()
         return deleted
+
+    # ── Extras ────────────────────────────────────────────
+
+    def get_extras(self, site: str) -> List[Dict]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, key, value FROM vault_extras WHERE site = %s ORDER BY id",
+                    (site,)
+                )
+                return [{"id": r[0], "key": r[1], "value": r[2]} for r in cur.fetchall()]
+
+    def add_extra(self, site: str, key: str, value: str):
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO vault_extras (site, key, value) VALUES (%s, %s, %s)",
+                    (site, key, value)
+                )
+            conn.commit()
+
+    def delete_extra(self, extra_id: int):
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM vault_extras WHERE id = %s", (extra_id,))
+            conn.commit()
+
+    def has_extras(self, site: str) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM vault_extras WHERE site = %s LIMIT 1", (site,)
+                )
+                return cur.fetchone() is not None
