@@ -80,16 +80,19 @@ class Database:
             return
         cols = list(safe.keys())
         vals = list(safe.values())
-        col_list = ["site"] + cols
-        placeholders = ", ".join(["%s"] * len(col_list))
-        update_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols) + ", updated_at = NOW()"
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    f"INSERT INTO vault ({', '.join(col_list)}) VALUES ({placeholders}) "
-                    f"ON CONFLICT (site) DO UPDATE SET {update_clause}",
-                    [site] + vals,
-                )
+                cur.execute("SELECT 1 FROM vault WHERE site = %s", (site,))
+                if cur.fetchone():
+                    set_clause = ", ".join(f"{c} = %s" for c in cols) + ", updated_at = NOW()"
+                    cur.execute(f"UPDATE vault SET {set_clause} WHERE site = %s", vals + [site])
+                else:
+                    col_list = ["site"] + cols
+                    placeholders = ", ".join(["%s"] * len(col_list))
+                    cur.execute(
+                        f"INSERT INTO vault ({', '.join(col_list)}) VALUES ({placeholders})",
+                        [site] + vals,
+                    )
             conn.commit()
 
     def get_entry(self, site: str) -> Optional[Dict[str, str]]:
