@@ -1,9 +1,11 @@
 import os
 import io
+import re
 import csv
 import logging
 import asyncio
 import threading
+from typing import Dict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import openpyxl
 
@@ -717,18 +719,45 @@ async def import_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Missing required column: name")
         return ConversationHandler.END
     rows = list(rows)
-    queue, imported, skipped = await asyncio.to_thread(_process_import_rows, rows, col_index)
-    ctx.user_data["import_queue"] = queue
-    ctx.user_data["import_stats"] = {"imported": imported, "skipped": skipped, "resolved": 0}
+    imported, skipped, renamed = await asyncio.to_thread(_process_import_rows, rows, col_index)
+    ctx.user_data["import_queue"] = []
+    ctx.user_data["import_stats"] = {"imported": imported, "skipped": skipped, "resolved": 0, "renamed": renamed}
     return await _import_next(update.message.reply_text, ctx)
+
+
+_VARIANT_RE = re.compile(r" \(\d+\)$")
 
 
 def _process_import_rows(rows: list, col_index: dict):
     """Runs in a worker thread (via asyncio.to_thread) so the blocking DB
-    calls for a large import don't freeze the bot's event loop / polling."""
+    calls for a large import don't freeze the bot's event loop / polling.
+
+    Rows sharing a site name are common with Chrome exports (saved-password
+    history, or genuinely distinct accounts for the same site). A row that
+    exactly matches an already-saved variant is skipped as a duplicate; a
+    row with different values is saved under an auto-numbered name like
+    "site.com (2)" instead of prompting for manual clash resolution.
+    """
     db_cols = db.get_columns()
-    imported = skipped = 0
-    queue = []
+    imported = skipped = renamed = 0
+    variants_cache: Dict[str, list] = {}
+
+    def load_variants(base: str) -> list:
+        if base in variants_cache:
+            return variants_cache[base]
+        variants = []
+        for s in db.list_sites():
+            if s == base or (s.startswith(base + " (") and _VARIANT_RE.search(s)):
+                entry = db.get_entry(s) or {}
+                sig = {}
+                for col, val in entry.items():
+                    if not val:
+                        continue
+                    sig[col] = decrypt(MASTER_PASSWORD, val) if col == "password" else val
+                variants.append((s, sig))
+        variants_cache[base] = variants
+        return variants
+
     for row in rows:
         def cell(key):
             return str(row[col_index[key]]).strip() if key in col_index and row[col_index[key]] is not None else ""
@@ -736,30 +765,31 @@ def _process_import_rows(rows: list, col_index: dict):
         if not name:
             skipped += 1
             continue
-        existing = db.get_entry(name)
-        diffs = []
-        final_fields = {}
-        for col in db_cols:
-            new_val = cell(col)
-            if not new_val:
-                continue
-            old_val = None
-            if existing:
-                old_raw = existing.get(col) or ""
-                if col == "password" and old_raw:
-                    old_val = decrypt(MASTER_PASSWORD, old_raw)
-                elif col != "password":
-                    old_val = old_raw or None
-            if old_val and old_val != new_val:
-                diffs.append((col, old_val, new_val))
-            else:
-                final_fields[col] = new_val
-        if diffs:
-            queue.append({"name": name, "final_fields": final_fields, "diffs": diffs, "diff_idx": 0})
+        fields = {col: cell(col) for col in db_cols if cell(col)}
+        if not fields:
+            skipped += 1
+            continue
+
+        variants = load_variants(name)
+        if any(sig == fields for _, sig in variants):
+            skipped += 1
+            continue
+
+        if not variants:
+            site_name = name
         else:
-            _save_imported_entry(name, final_fields)
-            imported += 1
-    return queue, imported, skipped
+            existing_names = {s for s, _ in variants}
+            n = 2
+            while f"{name} ({n})" in existing_names:
+                n += 1
+            site_name = f"{name} ({n})"
+            renamed += 1
+
+        _save_imported_entry(site_name, fields)
+        variants.append((site_name, fields))
+        imported += 1
+
+    return imported, skipped, renamed
 
 
 def _save_imported_entry(name: str, fields: dict):
@@ -790,13 +820,15 @@ async def _import_next(send, ctx: ContextTypes.DEFAULT_TYPE):
             ]]),
         )
         return IMPORT_REVIEW
-    stats = ctx.user_data.pop("import_stats", {"imported": 0, "skipped": 0, "resolved": 0})
+    stats = ctx.user_data.pop("import_stats", {"imported": 0, "skipped": 0, "resolved": 0, "renamed": 0})
     ctx.user_data.pop("import_queue", None)
     msg = f"✅ Imported {stats['imported']} entr{'y' if stats['imported'] == 1 else 'ies'}."
     if stats["resolved"]:
         msg += f" Resolved {stats['resolved']} clash{'es' if stats['resolved'] != 1 else ''}."
+    if stats.get("renamed"):
+        msg += f" Auto-numbered {stats['renamed']} duplicate site name{'s' if stats['renamed'] != 1 else ''} (e.g. \"site.com (2)\")."
     if stats["skipped"]:
-        msg += f" Skipped {stats['skipped']} rows with no name."
+        msg += f" Skipped {stats['skipped']} rows (no name or exact duplicate)."
     await send(msg)
     return ConversationHandler.END
 
