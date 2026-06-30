@@ -814,6 +814,16 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ── RESTART ───────────────────────────────────────────────
+
+async def restart_bot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+    await update.message.reply_text("🔄 Restarting...")
+    logger.warning("Restart requested via /restart, exiting process.")
+    os._exit(0)
+
+
 # (exception class name substring, message substring) -> user-facing hint.
 # Add an entry here whenever a new root cause shows up in the logs so the
 # bot can name it instead of saying "something went wrong". See KNOWN_ERRORS.md.
@@ -858,6 +868,7 @@ async def _post_init(app):
         BotCommand("import",  "Import from Excel"),
         BotCommand("columns", "Manage columns"),
         BotCommand("cancel",  "Cancel current action"),
+        BotCommand("restart", "Restart the bot"),
     ])
     await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
@@ -986,6 +997,7 @@ def main():
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(CommandHandler("columns", columns_menu))
     app.add_handler(CommandHandler("import", import_prompt))
+    app.add_handler(CommandHandler("restart", restart_bot))
     app.add_handler(CallbackQueryHandler(list_handler,  pattern="^list$"))
     app.add_handler(CallbackQueryHandler(columns_menu,  pattern="^columns$"))
     app.add_handler(CallbackQueryHandler(import_prompt, pattern="^import$"))
