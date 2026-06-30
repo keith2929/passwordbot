@@ -1,5 +1,6 @@
 import os
 import io
+import csv
 import logging
 import asyncio
 import threading
@@ -679,7 +680,7 @@ async def import_prompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         send = update.message.reply_text
     cols = db.get_columns()
     await send(
-        f"📥 Send me your Excel file (.xlsx)\n"
+        f"📥 Send me your Excel (.xlsx) or CSV (.csv) file\n"
         f"*Required column:* name\n"
         f"*Available columns:* {', '.join(cols)}\n"
         f"Missing fields will be set to empty.",
@@ -691,18 +692,25 @@ async def import_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return ConversationHandler.END
     doc = update.message.document
-    if not doc.file_name.lower().endswith(".xlsx"):
-        await update.message.reply_text("Please send a .xlsx file.")
+    fname = doc.file_name.lower()
+    if not (fname.endswith(".xlsx") or fname.endswith(".csv")):
+        await update.message.reply_text("Please send a .xlsx or .csv file.")
         return ConversationHandler.END
     await update.message.reply_text("⏳ Processing...")
     file = await ctx.bot.get_file(doc.file_id)
     buf = io.BytesIO()
     await file.download_to_memory(buf)
     buf.seek(0)
-    wb = openpyxl.load_workbook(buf, read_only=True, data_only=True)
-    ws = wb.active
-    rows = ws.iter_rows(values_only=True)
-    raw_headers = next(rows)
+    if fname.endswith(".csv"):
+        text = buf.read().decode("utf-8-sig")
+        reader = csv.reader(io.StringIO(text))
+        rows = iter(reader)
+        raw_headers = next(rows)
+    else:
+        wb = openpyxl.load_workbook(buf, read_only=True, data_only=True)
+        ws = wb.active
+        rows = ws.iter_rows(values_only=True)
+        raw_headers = next(rows)
     headers = [str(h).strip().lower() if h is not None else "" for h in raw_headers]
     col_index = {h: i for i, h in enumerate(headers)}
     if "name" not in col_index:
@@ -936,7 +944,10 @@ def main():
 
     import_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Document.FileExtension("xlsx"), import_excel),
+            MessageHandler(
+                filters.Document.FileExtension("xlsx") | filters.Document.FileExtension("csv"),
+                import_excel,
+            ),
         ],
         states={
             IMPORT_REVIEW: [CallbackQueryHandler(import_resolve, pattern="^importkeep:")],
