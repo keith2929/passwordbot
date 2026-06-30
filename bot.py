@@ -739,7 +739,16 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _post_init(app):
-    await app.bot.set_my_commands([BotCommand("menu", "Choose an action")])
+    await app.bot.set_my_commands([
+        BotCommand("menu",    "Choose an action"),
+        BotCommand("add",     "Add a new entry"),
+        BotCommand("search",  "Search for a site"),
+        BotCommand("list",    "List all sites"),
+        BotCommand("delete",  "Delete an entry"),
+        BotCommand("import",  "Import from Excel"),
+        BotCommand("columns", "Manage columns"),
+        BotCommand("cancel",  "Cancel current action"),
+    ])
     await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
@@ -791,6 +800,7 @@ def main():
         entry_points=[
             CallbackQueryHandler(site_selected, pattern="^site:"),
             CallbackQueryHandler(search_start,  pattern="^search$"),
+            CommandHandler("search", search_start),
         ],
         states={
             SEARCH:         [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query)],
@@ -850,6 +860,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_handler))
     app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CommandHandler("columns", columns_menu))
+    app.add_handler(CommandHandler("import", import_prompt))
     app.add_handler(CallbackQueryHandler(list_handler,  pattern="^list$"))
     app.add_handler(CallbackQueryHandler(columns_menu,  pattern="^columns$"))
     app.add_handler(CallbackQueryHandler(import_prompt, pattern="^import$"))
