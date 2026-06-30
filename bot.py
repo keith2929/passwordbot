@@ -40,6 +40,7 @@ EXTRAS_COL_MGMT  = 11
 EXTRAS_ADD_COL   = 12
 EXTRAS_ADD_ROW   = 13
 EXTRAS_EDIT_CELL = 14
+IMPORT_REVIEW    = 15
 
 _SENSITIVE_COLS = {"password"}
 
@@ -688,11 +689,11 @@ async def import_prompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def import_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
-        return
+        return ConversationHandler.END
     doc = update.message.document
     if not doc.file_name.lower().endswith(".xlsx"):
         await update.message.reply_text("Please send a .xlsx file.")
-        return
+        return ConversationHandler.END
     await update.message.reply_text("⏳ Processing...")
     file = await ctx.bot.get_file(doc.file_id)
     buf = io.BytesIO()
@@ -706,9 +707,10 @@ async def import_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     col_index = {h: i for i, h in enumerate(headers)}
     if "name" not in col_index:
         await update.message.reply_text("❌ Missing required column: name")
-        return
+        return ConversationHandler.END
     db_cols = db.get_columns()
     imported = skipped = 0
+    queue = []
     for row in rows:
         def cell(key):
             return str(row[col_index[key]]).strip() if key in col_index and row[col_index[key]] is not None else ""
@@ -716,19 +718,85 @@ async def import_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not name:
             skipped += 1
             continue
-        fields = {}
+        existing = db.get_entry(name)
+        diffs = []
+        final_fields = {}
         for col in db_cols:
-            if col == "password":
-                raw = cell("password")
-                fields["password"] = encrypt(MASTER_PASSWORD, raw) if raw else ""
+            new_val = cell(col)
+            if not new_val:
+                continue
+            old_val = None
+            if existing:
+                old_raw = existing.get(col) or ""
+                if col == "password" and old_raw:
+                    old_val = decrypt(MASTER_PASSWORD, old_raw)
+                elif col != "password":
+                    old_val = old_raw or None
+            if old_val and old_val != new_val:
+                diffs.append((col, old_val, new_val))
             else:
-                fields[col] = cell(col)
-        db.save_entry(name, fields)
-        imported += 1
-    await update.message.reply_text(
-        f"✅ Imported {imported} entr{'y' if imported == 1 else 'ies'}."
-        + (f" Skipped {skipped} rows with no name." if skipped else "")
-    )
+                final_fields[col] = new_val
+        if diffs:
+            queue.append({"name": name, "final_fields": final_fields, "diffs": diffs, "diff_idx": 0})
+        else:
+            _save_imported_entry(name, final_fields)
+            imported += 1
+    ctx.user_data["import_queue"] = queue
+    ctx.user_data["import_stats"] = {"imported": imported, "skipped": skipped, "resolved": 0}
+    return await _import_next(update.message.reply_text, ctx)
+
+
+def _save_imported_entry(name: str, fields: dict):
+    save_fields = {}
+    for col, val in fields.items():
+        save_fields[col] = encrypt(MASTER_PASSWORD, val) if col == "password" else val
+    db.save_entry(name, save_fields)
+
+
+async def _import_next(send, ctx: ContextTypes.DEFAULT_TYPE):
+    queue = ctx.user_data.get("import_queue", [])
+    while queue:
+        item = queue[0]
+        if item["diff_idx"] >= len(item["diffs"]):
+            _save_imported_entry(item["name"], item["final_fields"])
+            ctx.user_data["import_stats"]["resolved"] += 1
+            queue.pop(0)
+            continue
+        col, old_val, new_val = item["diffs"][item["diff_idx"]]
+        await send(
+            f"⚠️ *Clash detected* for *{item['name']}* → `{col}`\n"
+            f"1️⃣ Keep existing: `{old_val}`\n"
+            f"2️⃣ Use imported: `{new_val}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("1️⃣ Keep existing", callback_data="importkeep:old"),
+                InlineKeyboardButton("2️⃣ Use imported",  callback_data="importkeep:new"),
+            ]]),
+        )
+        return IMPORT_REVIEW
+    stats = ctx.user_data.pop("import_stats", {"imported": 0, "skipped": 0, "resolved": 0})
+    ctx.user_data.pop("import_queue", None)
+    msg = f"✅ Imported {stats['imported']} entr{'y' if stats['imported'] == 1 else 'ies'}."
+    if stats["resolved"]:
+        msg += f" Resolved {stats['resolved']} clash{'es' if stats['resolved'] != 1 else ''}."
+    if stats["skipped"]:
+        msg += f" Skipped {stats['skipped']} rows with no name."
+    await send(msg)
+    return ConversationHandler.END
+
+
+async def import_resolve(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    queue = ctx.user_data.get("import_queue", [])
+    if not queue:
+        return ConversationHandler.END
+    item = queue[0]
+    col, old_val, new_val = item["diffs"][item["diff_idx"]]
+    if query.data.split(":", 1)[1] == "new":
+        item["final_fields"][col] = new_val
+    item["diff_idx"] += 1
+    return await _import_next(query.message.reply_text, ctx)
 
 
 # ── CANCEL ────────────────────────────────────────────────
@@ -857,6 +925,17 @@ def main():
         per_message=False,
     )
 
+    import_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Document.FileExtension("xlsx"), import_excel),
+        ],
+        states={
+            IMPORT_REVIEW: [CallbackQueryHandler(import_resolve, pattern="^importkeep:")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=False,
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_handler))
     app.add_handler(CommandHandler("menu", show_menu))
@@ -865,7 +944,7 @@ def main():
     app.add_handler(CallbackQueryHandler(list_handler,  pattern="^list$"))
     app.add_handler(CallbackQueryHandler(columns_menu,  pattern="^columns$"))
     app.add_handler(CallbackQueryHandler(import_prompt, pattern="^import$"))
-    app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), import_excel))
+    app.add_handler(import_conv)
     app.add_handler(add_conv)
     app.add_handler(col_conv)
     app.add_handler(vault_conv)
