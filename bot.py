@@ -45,6 +45,8 @@ EXTRAS_ADD_ROW   = 13
 EXTRAS_EDIT_CELL = 14
 IMPORT_REVIEW    = 15
 EDIT_RENAME      = 16
+DELETE_MASTER    = 17
+DELETE_CONFIRM   = 18
 
 _SENSITIVE_COLS = {"password"}
 
@@ -347,7 +349,8 @@ async def action_reveal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     site = ctx.user_data["pending_site"]
     entry = ctx.user_data["entry"]
-    extras = db.get_extras(site)
+    extra_cols = db.get_extra_cols(site)
+    extra_rows = db.get_extra_rows(site)
 
     lines = [f"🔑 *{site}*"]
     for col, val in entry.items():
@@ -359,10 +362,13 @@ async def action_reveal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             lines.append(f"{emoji} {col}: `{val}`")
 
-    if extras:
+    if extra_rows:
         lines.append("\n📎 *Extras — refer to table:*")
-        for ex in extras:
-            lines.append(f"  • {ex['key']}: `{ex['value']}`")
+        for i, (rn, row_data) in enumerate(sorted(extra_rows.items()), 1):
+            lines.append(f"_Row {i}_")
+            for c in extra_cols:
+                val = row_data.get(c, "") or "(empty)"
+                lines.append(f"  • {c}: `{val}`")
 
     lines.append("\n_Self-deletes in 30s_")
 
@@ -686,18 +692,109 @@ async def delete_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text("Which site to delete?")
+        await update.callback_query.message.reply_text("Type part of the site name to delete:")
     else:
-        await update.message.reply_text("Which site to delete?")
+        await update.message.reply_text("Type part of the site name to delete:")
     return DELETE_SITE
 
 
-async def delete_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    site = update.message.text.strip().lower()
+async def delete_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip().lower()
+    results = db.search_sites(query)
+    if not results:
+        await update.message.reply_text(f"❌ No matches for *{query}*.", parse_mode="Markdown")
+        return ConversationHandler.END
+    await update.message.reply_text(
+        f"Found {len(results)} match{'es' if len(results) != 1 else ''} — tap one to delete:",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(s, callback_data=f"delpick:{s}")] for s in results]
+        ),
+    )
+    return DELETE_SITE
+
+
+async def delete_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    site = update.callback_query.data.split(":", 1)[1]
+    ctx.user_data["delete_site"] = site
+    msg = await update.callback_query.message.reply_text(
+        "🔑 Enter master password to confirm:\n_Message will be deleted immediately._",
+        parse_mode="Markdown",
+    )
+    ctx.user_data["delete_prompt_msg_id"] = msg.message_id
+    return DELETE_MASTER
+
+
+async def delete_master_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    typed = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    try:
+        await ctx.bot.delete_message(update.effective_chat.id, ctx.user_data.get("delete_prompt_msg_id"))
+    except Exception:
+        pass
+
+    if typed != MASTER_PASSWORD:
+        await ctx.bot.send_message(update.effective_chat.id, "❌ Wrong master password.")
+        return ConversationHandler.END
+
+    site = ctx.user_data["delete_site"]
+    entry = db.get_entry(site)
+    if not entry:
+        await ctx.bot.send_message(
+            update.effective_chat.id, f"❌ No entry for *{site}*.", parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    lines = [f"⚠️ *About to delete {site}:*"]
+    for col, val in entry.items():
+        if not val:
+            continue
+        emoji = _COL_EMOJI.get(col, "•")
+        if col == "password":
+            lines.append(f"{emoji} `{decrypt(MASTER_PASSWORD, val)}`")
+        else:
+            lines.append(f"{emoji} {col}: `{val}`")
+
+    cols = db.get_extra_cols(site)
+    rows = db.get_extra_rows(site)
+    if rows:
+        lines.append("\n📎 *Extras:*")
+        for i, (rn, row_data) in enumerate(sorted(rows.items()), 1):
+            lines.append(f"_Row {i}_")
+            for c in cols:
+                val = row_data.get(c, "") or "(empty)"
+                lines.append(f"  • {c}: `{val}`")
+
+    lines.append("\n*This cannot be undone. Delete this entry?*")
+
+    await ctx.bot.send_message(
+        update.effective_chat.id,
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🗑️ Yes, delete", callback_data="delconfirm_yes"),
+            InlineKeyboardButton("❌ Cancel",       callback_data="delconfirm_no"),
+        ]]),
+    )
+    return DELETE_CONFIRM
+
+
+async def delete_confirm_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    site = ctx.user_data["delete_site"]
     if db.delete_entry(site):
-        await update.message.reply_text(f"🗑️ Deleted *{site}*.", parse_mode="Markdown")
+        await update.callback_query.message.reply_text(f"🗑️ Deleted *{site}*.", parse_mode="Markdown")
     else:
-        await update.message.reply_text(f"❌ No entry for *{site}*.", parse_mode="Markdown")
+        await update.callback_query.message.reply_text(f"❌ No entry for *{site}*.", parse_mode="Markdown")
+    return ConversationHandler.END
+
+
+async def delete_confirm_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("Cancelled — nothing was deleted.")
     return ConversationHandler.END
 
 
@@ -1047,7 +1144,17 @@ def main():
             CallbackQueryHandler(delete_start, pattern="^delete$"),
         ],
         states={
-            DELETE_SITE: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)],
+            DELETE_SITE: [
+                CallbackQueryHandler(delete_pick, pattern="^delpick:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, delete_search),
+            ],
+            DELETE_MASTER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, delete_master_confirm),
+            ],
+            DELETE_CONFIRM: [
+                CallbackQueryHandler(delete_confirm_yes, pattern="^delconfirm_yes$"),
+                CallbackQueryHandler(delete_confirm_no,  pattern="^delconfirm_no$"),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_message=False,
