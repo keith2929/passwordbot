@@ -462,12 +462,12 @@ def _extras_text(site: str, cols: list, rows: dict) -> str:
     if not rows:
         return (f"📊 *Extras for {site}*\n\n"
                 f"*Columns:* {', '.join(cols)}\n\n_No rows yet. Tap ➕ Add Row._")
-    col_w = 18
-    header = "No   " + "  ".join(c[:col_w].ljust(col_w) for c in cols)
-    lines = [f"📊 *Extras for {site}*\n", f"`{header}`", "`" + "─" * len(header) + "`"]
+    lines = [f"📊 *Extras for {site}*"]
     for i, (rn, row_data) in enumerate(sorted(rows.items()), 1):
-        cells = "  ".join((row_data.get(c, "") or "(empty)")[:col_w].ljust(col_w) for c in cols)
-        lines.append(f"`{str(i).ljust(5)}{cells}`")
+        lines.append(f"\n*Row {i}*")
+        for c in cols:
+            val = row_data.get(c, "") or "(empty)"
+            lines.append(f"• {c}: `{val}`")
     return "\n".join(lines)
 
 
