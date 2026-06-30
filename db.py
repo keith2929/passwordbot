@@ -37,6 +37,23 @@ class Database:
                     ("notes",   "TEXT DEFAULT ''"),
                 ]:
                     cur.execute(f"ALTER TABLE vault ADD COLUMN IF NOT EXISTS {col} {defn}")
+                # older deployments may have columns (e.g. username) left over
+                # as NOT NULL with no default from before DEFAULT '' was added;
+                # normalize every non-system column so partial saves never fail
+                cur.execute("""
+                    DO $$
+                    DECLARE col text;
+                    BEGIN
+                        FOR col IN
+                            SELECT column_name FROM information_schema.columns
+                            WHERE table_name = 'vault'
+                              AND column_name NOT IN ('site', 'created_at', 'updated_at')
+                        LOOP
+                            EXECUTE format('ALTER TABLE vault ALTER COLUMN %I DROP NOT NULL', col);
+                            EXECUTE format('ALTER TABLE vault ALTER COLUMN %I SET DEFAULT %L', col, '');
+                        END LOOP;
+                    END $$;
+                """)
                 # column definitions per site
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS vault_extra_cols (

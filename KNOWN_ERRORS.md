@@ -9,6 +9,7 @@ When the bot hits an unrecognized exception it will tell you so in chat
 |---|---|---|
 | `psycopg2.errors.InvalidColumnReference: there is no unique or exclusion constraint matching the ON CONFLICT specification` | `vault_extras` table predated the `UNIQUE(site, row_num, col_name)` constraint added later in code. `CREATE TABLE IF NOT EXISTS` doesn't retrofit constraints onto an existing table. | Added a migration in `db.py`'s `_init()` that adds the constraint if missing. |
 | `psycopg2.errors.NotNullViolation: null value in column "key"` | Legacy `vault_extras.key` column (from the old key/value schema) still had `NOT NULL`, but new code writes `col_name`/`value` and never populates `key`. | Added a migration that drops `NOT NULL` on `key` if the column exists. |
+| `psycopg2.errors.NotNullViolation: null value in column "username" of relation "vault"` | Production `vault` table predated `DEFAULT ''` on `username`/etc., so when an imported CSV row omitted that field, the INSERT skipped the column and hit the old NOT NULL with no default. | Added a migration that loops every non-system `vault` column and drops NOT NULL + sets `DEFAULT ''`, so partial saves can never fail this way again (covers custom columns too). |
 
 ## How to extend
 
