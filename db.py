@@ -64,6 +64,18 @@ class Database:
                         ADD COLUMN IF NOT EXISTS row_num  INT  NOT NULL DEFAULT 1,
                         ADD COLUMN IF NOT EXISTS col_name TEXT NOT NULL DEFAULT ''
                 """)
+                # older deployments have a legacy NOT NULL "key" column unused by new code
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name = 'vault_extras' AND column_name = 'key'
+                        ) THEN
+                            ALTER TABLE vault_extras ALTER COLUMN key DROP NOT NULL;
+                        END IF;
+                    END $$;
+                """)
                 # older deployments may predate this constraint; add it if missing
                 cur.execute("""
                     DO $$
