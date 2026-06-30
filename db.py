@@ -109,6 +109,18 @@ class Database:
                         END IF;
                     END $$;
                 """)
+                # allow renaming a vault entry (UPDATE site) to cascade into
+                # extras tables instead of being blocked by the FK
+                for table in ("vault_extra_cols", "vault_extras"):
+                    cur.execute(f"""
+                        ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_site_fkey
+                    """)
+                    cur.execute(f"""
+                        ALTER TABLE {table}
+                            ADD CONSTRAINT {table}_site_fkey
+                            FOREIGN KEY (site) REFERENCES vault(site)
+                            ON UPDATE CASCADE ON DELETE CASCADE
+                    """)
             conn.commit()
 
     # Columns
@@ -190,6 +202,15 @@ class Database:
                 deleted = cur.rowcount > 0
             conn.commit()
         return deleted
+
+    def rename_entry(self, old_site: str, new_site: str) -> bool:
+        """Renames a vault entry's site key; extras cascade via ON UPDATE CASCADE."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE vault SET site = %s WHERE site = %s", (new_site, old_site))
+                renamed = cur.rowcount > 0
+            conn.commit()
+        return renamed
 
     # ── Extras ────────────────────────────────────────────────
 

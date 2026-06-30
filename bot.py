@@ -44,6 +44,7 @@ EXTRAS_ADD_COL   = 12
 EXTRAS_ADD_ROW   = 13
 EXTRAS_EDIT_CELL = 14
 IMPORT_REVIEW    = 15
+EDIT_RENAME      = 16
 
 _SENSITIVE_COLS = {"password"}
 
@@ -84,8 +85,10 @@ def action_inline() -> InlineKeyboardMarkup:
     ])
 
 
-def edit_pick_inline(entry: dict, edits: dict, extras_count: int) -> InlineKeyboardMarkup:
+def edit_pick_inline(entry: dict, edits: dict, extras_count: int, site: str = "") -> InlineKeyboardMarkup:
     buttons = []
+    if site:
+        buttons.append([InlineKeyboardButton(f"📝 Rename ({site})", callback_data="edit_rename")])
     for col, val in entry.items():
         current = edits.get(col, val) or ""
         emoji = _COL_EMOJI.get(col, "•")
@@ -392,7 +395,7 @@ async def _show_edit_pick(send_fn, ctx):
     msg = await send_fn(
         f"✏️ Editing *{site}* — tap a field to change it:",
         parse_mode="Markdown",
-        reply_markup=edit_pick_inline(entry, edits, len(extras)),
+        reply_markup=edit_pick_inline(entry, edits, len(extras), site),
     )
     if hasattr(msg, "message_id"):
         ctx.user_data["pick_msg_id"] = msg.message_id
@@ -433,11 +436,39 @@ async def edit_value_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.edit_message_reply_markup(
                 chat_id=update.effective_chat.id,
                 message_id=pick_msg_id,
-                reply_markup=edit_pick_inline(entry, edits, len(extras)),
+                reply_markup=edit_pick_inline(entry, edits, len(extras), site),
             )
             return EDIT_PICK
         except Exception:
             pass
+    return await _show_edit_pick(update.message.reply_text, ctx)
+
+
+async def edit_rename_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    site = ctx.user_data["pending_site"]
+    await update.callback_query.message.reply_text(
+        f"Enter a new name for *{site}*:", parse_mode="Markdown"
+    )
+    return EDIT_RENAME
+
+
+async def edit_rename_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    new_name = update.message.text.strip().lower()
+    old_name = ctx.user_data["pending_site"]
+    if not new_name:
+        await update.message.reply_text("❌ Name can't be empty. Try again.")
+        return EDIT_RENAME
+    if new_name == old_name:
+        await update.message.reply_text("That's already the current name.")
+        return await _show_edit_pick(update.message.reply_text, ctx)
+    if db.get_entry(new_name):
+        await update.message.reply_text(f"❌ *{new_name}* already exists. Pick another name.", parse_mode="Markdown")
+        return EDIT_RENAME
+    db.rename_entry(old_name, new_name)
+    ctx.user_data["pending_site"] = new_name
+    ctx.user_data["entry"] = db.get_entry(new_name)
+    await update.message.reply_text(f"✅ Renamed to *{new_name}*.", parse_mode="Markdown")
     return await _show_edit_pick(update.message.reply_text, ctx)
 
 
@@ -971,12 +1002,16 @@ def main():
                 CallbackQueryHandler(action_edit,   pattern="^action_edit$"),
             ],
             EDIT_PICK: [
-                CallbackQueryHandler(edit_col_pick, pattern="^editcol:"),
-                CallbackQueryHandler(edit_extras,   pattern="^edit_extras$"),
-                CallbackQueryHandler(edit_save,     pattern="^edit_save$"),
+                CallbackQueryHandler(edit_col_pick,    pattern="^editcol:"),
+                CallbackQueryHandler(edit_extras,      pattern="^edit_extras$"),
+                CallbackQueryHandler(edit_rename_start, pattern="^edit_rename$"),
+                CallbackQueryHandler(edit_save,        pattern="^edit_save$"),
             ],
             EDIT_VALUE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value_input),
+            ],
+            EDIT_RENAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_rename_save),
             ],
             EXTRAS_MENU: [
                 CallbackQueryHandler(extras_edit_row,      pattern="^extras_editrow:"),
