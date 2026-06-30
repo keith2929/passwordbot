@@ -11,10 +11,13 @@ _SYSTEM_COLS = {"site", "created_at", "updated_at"}
 class Database:
     def __init__(self, url: str = DATABASE_URL):
         self.url = url
+        self._conn = None
         self._init()
 
     def _connect(self):
-        return psycopg2.connect(self.url)
+        if self._conn is None or self._conn.closed:
+            self._conn = psycopg2.connect(self.url)
+        return self._conn
 
     def _init(self):
         with self._connect() as conn:
