@@ -6,7 +6,10 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import openpyxl
 
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import (
+    Update, InlineKeyboardMarkup, InlineKeyboardButton,
+    BotCommand, MenuButtonCommands,
+)
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, ConversationHandler, filters
@@ -37,8 +40,6 @@ EXTRAS_COL_MGMT  = 11
 EXTRAS_ADD_COL   = 12
 EXTRAS_ADD_ROW   = 13
 EXTRAS_EDIT_CELL = 14
-
-MENU_KB = ReplyKeyboardMarkup([["🔐 Menu"]], resize_keyboard=True)
 
 _SENSITIVE_COLS = {"password"}
 
@@ -137,7 +138,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔐 *Password Vault*\nTap Menu to get started.",
         parse_mode="Markdown",
-        reply_markup=MENU_KB,
     )
 
 
@@ -218,10 +218,16 @@ async def list_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── COLUMNS MANAGEMENT ────────────────────────────────────
 
 async def columns_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
+    if update.callback_query:
+        await update.callback_query.answer()
+        send = update.callback_query.message.reply_text
+    else:
+        if not is_allowed(update):
+            return
+        send = update.message.reply_text
     cols = db.get_columns()
     text = "⚙️ *Current columns:*\n" + "\n".join(f"• {c}" for c in cols)
-    await update.callback_query.message.reply_text(
+    await send(
         text,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
@@ -253,8 +259,11 @@ async def add_column_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def search_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return ConversationHandler.END
-    await update.callback_query.answer()
-    await update.callback_query.message.reply_text("🔍 Type a site name to search:")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text("🔍 Type a site name to search:")
+    else:
+        await update.message.reply_text("🔍 Type a site name to search:")
     return SEARCH
 
 
@@ -660,9 +669,15 @@ async def delete_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── IMPORT ────────────────────────────────────────────────
 
 async def import_prompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
+    if update.callback_query:
+        await update.callback_query.answer()
+        send = update.callback_query.message.reply_text
+    else:
+        if not is_allowed(update):
+            return
+        send = update.message.reply_text
     cols = db.get_columns()
-    await update.callback_query.message.reply_text(
+    await send(
         f"📥 Send me your Excel file (.xlsx)\n"
         f"*Required column:* name\n"
         f"*Available columns:* {', '.join(cols)}\n"
@@ -723,6 +738,11 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def _post_init(app):
+    await app.bot.set_my_commands([BotCommand("menu", "Choose an action")])
+    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+
 # ── HEALTH SERVER ─────────────────────────────────────────
 
 def _start_health_server():
@@ -740,7 +760,7 @@ def _start_health_server():
 def main():
     threading.Thread(target=_start_health_server, daemon=True).start()
     asyncio.set_event_loop(asyncio.new_event_loop())
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
 
     add_conv = ConversationHandler(
         entry_points=[
@@ -829,7 +849,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_handler))
-    app.add_handler(MessageHandler(filters.Text(["🔐 Menu"]), show_menu))
+    app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(CallbackQueryHandler(list_handler,  pattern="^list$"))
     app.add_handler(CallbackQueryHandler(columns_menu,  pattern="^columns$"))
     app.add_handler(CallbackQueryHandler(import_prompt, pattern="^import$"))
