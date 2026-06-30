@@ -814,11 +814,36 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# (exception class name substring, message substring) -> user-facing hint.
+# Add an entry here whenever a new root cause shows up in the logs so the
+# bot can name it instead of saying "something went wrong". See KNOWN_ERRORS.md.
+_KNOWN_ERRORS = [
+    ("UndefinedColumn", "", "⚠️ DB schema is out of date (missing column). Redeploy so the migration runs, or check db.py's _init()."),
+    ("InvalidColumnReference", "ON CONFLICT", "⚠️ A table is missing a UNIQUE constraint that ON CONFLICT needs. Check db.py's _init() migrations."),
+    ("NotNullViolation", "", "⚠️ A required DB column rejected an empty value (likely a legacy NOT NULL column). Check db.py's _init() migrations."),
+    ("ForeignKeyViolation", "", "⚠️ Tried to save extras/details for a site that doesn't exist in the vault yet."),
+    ("UniqueViolation", "", "⚠️ That entry already exists."),
+    ("OperationalError", "", "⚠️ Lost connection to the database. Try again in a moment."),
+    ("BadRequest", "can't parse entities", "⚠️ A value contained characters (*, _, `, etc.) that broke Markdown formatting."),
+    ("KeyError", "pending_site", "⚠️ Session expired — start over with /menu."),
+]
+
+
+def _diagnose(error: BaseException) -> str:
+    cls_name = type(error).__name__
+    msg = str(error)
+    for cls_sub, msg_sub, hint in _KNOWN_ERRORS:
+        if cls_sub in cls_name and msg_sub in msg:
+            return hint
+    return f"❌ Unrecognized error ({cls_name}). Check logs and consider adding it to KNOWN_ERRORS.md."
+
+
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error("Unhandled exception", exc_info=ctx.error)
     if isinstance(update, Update) and update.effective_chat:
+        hint = _diagnose(ctx.error) if ctx.error else "❌ Something went wrong."
         try:
-            await ctx.bot.send_message(update.effective_chat.id, "❌ Something went wrong. Try again or /cancel.")
+            await ctx.bot.send_message(update.effective_chat.id, f"{hint}\nTry again or /cancel.")
         except Exception:
             pass
 
