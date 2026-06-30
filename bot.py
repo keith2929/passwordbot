@@ -716,6 +716,16 @@ async def import_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if "name" not in col_index:
         await update.message.reply_text("❌ Missing required column: name")
         return ConversationHandler.END
+    rows = list(rows)
+    queue, imported, skipped = await asyncio.to_thread(_process_import_rows, rows, col_index)
+    ctx.user_data["import_queue"] = queue
+    ctx.user_data["import_stats"] = {"imported": imported, "skipped": skipped, "resolved": 0}
+    return await _import_next(update.message.reply_text, ctx)
+
+
+def _process_import_rows(rows: list, col_index: dict):
+    """Runs in a worker thread (via asyncio.to_thread) so the blocking DB
+    calls for a large import don't freeze the bot's event loop / polling."""
     db_cols = db.get_columns()
     imported = skipped = 0
     queue = []
@@ -749,9 +759,7 @@ async def import_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             _save_imported_entry(name, final_fields)
             imported += 1
-    ctx.user_data["import_queue"] = queue
-    ctx.user_data["import_stats"] = {"imported": imported, "skipped": skipped, "resolved": 0}
-    return await _import_next(update.message.reply_text, ctx)
+    return queue, imported, skipped
 
 
 def _save_imported_entry(name: str, fields: dict):
