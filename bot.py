@@ -806,6 +806,15 @@ async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled exception", exc_info=ctx.error)
+    if isinstance(update, Update) and update.effective_chat:
+        try:
+            await ctx.bot.send_message(update.effective_chat.id, "❌ Something went wrong. Try again or /cancel.")
+        except Exception:
+            pass
+
+
 async def _post_init(app):
     await app.bot.set_my_commands([
         BotCommand("menu",    "Choose an action"),
@@ -949,6 +958,7 @@ def main():
     app.add_handler(col_conv)
     app.add_handler(vault_conv)
     app.add_handler(delete_conv)
+    app.add_error_handler(error_handler)
 
     logger.info("Bot is running...")
     app.run_polling()

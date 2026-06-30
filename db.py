@@ -64,6 +64,19 @@ class Database:
                         ADD COLUMN IF NOT EXISTS row_num  INT  NOT NULL DEFAULT 1,
                         ADD COLUMN IF NOT EXISTS col_name TEXT NOT NULL DEFAULT ''
                 """)
+                # older deployments may predate this constraint; add it if missing
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint WHERE conname = 'vault_extras_site_row_num_col_name_key'
+                        ) THEN
+                            ALTER TABLE vault_extras
+                                ADD CONSTRAINT vault_extras_site_row_num_col_name_key
+                                UNIQUE (site, row_num, col_name);
+                        END IF;
+                    END $$;
+                """)
             conn.commit()
 
     # Columns
